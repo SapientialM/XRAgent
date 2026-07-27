@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.env
+memory/long_term/facts.db
+memory/long_term/facts.db-journal
+runtime_state.json
+diary/turns/
+.pytest_cache/

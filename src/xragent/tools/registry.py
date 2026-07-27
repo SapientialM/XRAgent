@@ -1,0 +1,112 @@
+"""ToolRegistry：工具注册中心。"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Callable
+
+from ..core.backend import ToolSpec
+
+
+@dataclass
+class ToolDef:
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    risk: str
+    handler: Callable[..., dict[str, Any]]
+
+
+class ToolRegistry:
+    def __init__(self):
+        self._tools: dict[str, ToolDef] = {}
+
+    def register(self, t: ToolDef) -> None:
+        if t.name in self._tools:
+            raise ValueError(f"重复注册: {t.name}")
+        self._tools[t.name] = t
+
+    def unregister(self, name: str) -> None:
+        self._tools.pop(name, None)
+
+    def get(self, name: str) -> ToolDef:
+        if name not in self._tools:
+            raise KeyError(f"未知工具: {name}")
+        return self._tools[name]
+
+    def names(self) -> list[str]:
+        return list(self._tools.keys())
+
+    def specs(self) -> list[ToolSpec]:
+        return [
+            ToolSpec(name=t.name, description=t.description, input_schema=t.input_schema, risk=t.risk)
+            for t in self._tools.values()
+        ]
+
+    def run(self, name: str, args: dict[str, Any], gate=None) -> dict[str, Any]:
+        td = self.get(name)
+        req = None
+        if td.risk == "high" and gate is not None:
+            from ..hitl.gate import ApprovalRequest, ApprovalResult, Decision
+            req = ApprovalRequest(
+                tool_name=name, tool_args=args, risk=td.risk,
+                summary=f"{name}({list(args.keys())})", tool_call_id=name,
+            )
+            res = gate.request(req)
+            if res.decision == Decision.REJECT:
+                return {"ok": False, "blocked_by": "hitl", "reason": res.reason}
+            if res.decision == Decision.EDIT and res.edited_args:
+                args = res.edited_args
+        try:
+            out = td.handler(**args)
+        except Exception as e:
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        if req is not None:
+            out = {"ok": out.get("ok", True), **out, "hitl_approved": True}
+        return out
+
+
+def build_default_registry() -> ToolRegistry:
+    from . import fs_tools, exec_tools, git_tools, memory_tools, diary_tools, evolve_tools
+    from ..config.settings import get_settings
+
+    r = ToolRegistry()
+
+    def add(name, desc, schema, risk, fn):
+        r.register(ToolDef(name=name, description=desc, input_schema=schema, risk=risk, handler=fn))
+
+    add("read_file", "读取仓库内文件内容；目标必须位于仓库根之下。",
+        {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+        "low", fs_tools.read_file)
+    add("list_dir", "列出仓库内目录内容（不含 .git）。",
+        {"type": "object", "properties": {"path": {"type": "string", "default": "."}}},
+        "low", fs_tools.list_dir)
+    add("write_file", "在仓库内创建/覆盖文件；目标必须经过路径围栏与黑名单校验。需要 HITL 审批。",
+        {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]},
+        "high", fs_tools.write_file)
+    add("run_cmd", "在仓库根执行 shell 命令；30s 超时；走 binary 黑名单。需要 HITL 审批。",
+        {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]},
+        "high", exec_tools.run_cmd)
+    add("git_commit", "对仓库内当前变更做 git add+commit；返回 commit hash。需要 HITL 审批。",
+        {"type": "object", "properties": {"message": {"type": "string"}}, "required": ["message"]},
+        "high", git_tools.git_commit)
+    add("git_push", "git push 到 origin/<branch>；网络失败时返回错误。需要 HITL 审批。",
+        {"type": "object", "properties": {"remote": {"type": "string", "default": "origin"}, "branch": {"type": "string", "default": "main"}}},
+        "high", git_tools.git_push)
+    add("memory_save", "向长期记忆写入一条事实（SQLite）。",
+        {"type": "object", "properties": {"category": {"type": "string"}, "content": {"type": "string"}}, "required": ["category", "content"]},
+        "low", memory_tools.memory_save)
+    add("diary_write", "向 diary/YYYY-MM-DD.md 追加一段（人类可读）。",
+        {"type": "object", "properties": {"title": {"type": "string"}, "body": {"type": "string"}}, "required": ["title", "body"]},
+        "low", diary_tools.diary_write)
+    add("propose_self_replace", "金蝉脱壳：commit → push → 编译 → supervisor 切换。需要 HITL 审批。",
+        {"type": "object", "properties": {"reason": {"type": "string"}, "entry": {"type": "string", "default": "src/xragent/main.py"}}, "required": ["reason"]},
+        "high", evolve_tools.propose_self_replace)
+    add("terminate", "优雅终止当前 Agent 进程；supervisor 不会再自动拉起。需要 HITL 审批。",
+        {"type": "object", "properties": {"reason": {"type": "string"}}, "required": ["reason"]},
+        "high", evolve_tools.terminate)
+
+    s = get_settings()
+    if not s.evolution_enabled:
+        r.unregister("propose_self_replace")
+        r.unregister("terminate")
+    return r
