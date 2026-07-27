@@ -54,13 +54,16 @@ class SideGit:
             except RuntimeError:
                 pass
 
-    def _stash_excludes(self) -> list[str]:
-        out = []
+    def _stash_pathspec(self) -> list[str]:
+        """git stash push 的 pathspec 排除项（防止误清源代码）。
+
+        格式：-- + ':!path'；路径以 / 结尾表示目录。
+        """
+        out = ["--"]
         for item in self.settings.stash_excludes:
-            if item.endswith("/"):
-                out += ["--exclude", f"{item}*"]
-            else:
-                out += ["--", f":!{item}"]
+            # 目录加 '*' 通配
+            suffix = "*" if item.endswith("/") else ""
+            out.append(f":!{item}{suffix}")
         return out
 
     def snapshot(self, turn_id: str, note: str = "") -> Snapshot:
@@ -68,7 +71,18 @@ class SideGit:
         pre_stash = None
         if self._has_changes():
             try:
-                self._run("stash", "push", "-u", *self._stash_excludes(), "-m", f"xragent-pre-{turn_id}")
+                # pathspec 排除项 — 必须以 -- 与前面的 options 分隔
+                # 但 stash push -u 时 pathspec 只对 tracked 生效；
+                # untracked 文件必须单独用 .gitignore-style exclude。
+                # 所以这里用 --include-untracked + -- ':!untracked/*' 不行；
+                # 改方案：把所有 untracked 但属于"源代码"的加到 git add 然后 stash，
+                # 或用 .git/info/exclude 临时屏蔽（侵入性大）。
+                #
+                # 实际最简方案：snapshot 只 stash tracked + modified 的改动；
+                # untracked 文件留在 working tree。ReAct 写出的 diary/memory 等
+                # 本身是 untracked，会被 SideGit 标记为 working tree dirty
+                # 而不被 stash。
+                self._run("stash", "push", "-m", f"xragent-pre-{turn_id}")
                 pre_stash = f"xragent-pre-{turn_id}"
             except RuntimeError:
                 pre_stash = None
