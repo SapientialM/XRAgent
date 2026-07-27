@@ -44,7 +44,7 @@ class PathSandbox:
 
 
 _DANGEROUS_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\brm\s+-rf?\s+/\b"),
+    re.compile(r"\brm\s+-rf?\s+/"),
     re.compile(r"\b:()\{\s*:\|:&\s*\};:\b"),
     re.compile(r">\s*/dev/(sd|hd|nvme)"),
     re.compile(r"\bsudo\b"),
