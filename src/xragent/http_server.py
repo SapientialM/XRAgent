@@ -13,13 +13,29 @@ if TYPE_CHECKING:
     from .core.react_loop import ReActLoop
 
 
-_shared_queue: "queue.Queue[dict]" = queue.Queue()
+_shared_input_queue: "queue.Queue | None" = None
+_last_answer_box: "dict | None" = None
 _http_reply_queue: "queue.Queue[dict]" = queue.Queue()
 _loop_ref: list = []
 
 
+def register_input_queue(q: "queue.Queue") -> None:
+    """main.py 注册共享输入队列；HTTP /message 直接 put。"""
+    global _shared_input_queue
+    _shared_input_queue = q
+
+
+def register_answer_sink(box: dict) -> None:
+    """main.py 注册 last_answer 容器；HTTP /last-answer 读它。"""
+    global _last_answer_box
+    _last_answer_box = box
+
+
 def enqueue_message(text: str) -> None:
-    _shared_queue.put({"text": text})
+    if _shared_input_queue is not None:
+        _shared_input_queue.put(text)
+    else:
+        raise RuntimeError("input queue 未注册；用 xragent.main --serve 启动")
 
 
 def start_server_background(loop: "ReActLoop") -> None:
@@ -73,6 +89,12 @@ def _make_handler(token: str):
         def do_GET(self):
             if not self._check_token():
                 self._send_json(401, {"error": "unauthorized"})
+                return
+            if self.path == "/last-answer":
+                if _last_answer_box is None:
+                    self._send_json(503, {"error": "not ready"})
+                    return
+                self._send_json(200, {"answer": _last_answer_box["answer"], "ts": _last_answer_box["ts"]})
                 return
             if self.path == "/health":
                 import os

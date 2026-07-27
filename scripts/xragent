@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# xragent launcher: 选 Python + 注入 PYTHONPATH + 转发命令
+set -e
+
+if command -v python3.11 >/dev/null 2>&1; then
+  PY=python3.11
+elif command -v python3 >/dev/null 2>&1; then
+  PY=python3
+else
+  echo "no python found"; exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+export PYTHONPATH="$REPO_ROOT/src:${PYTHONPATH:-}"
+
+exec "$PY" -m xragent.main "$@"
