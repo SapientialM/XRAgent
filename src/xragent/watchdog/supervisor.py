@@ -58,7 +58,19 @@ def run_forever() -> None:
         if state.get("restart_suppressed"):
             print("[supervisor] restart_suppressed detected; exit.", flush=True)
             return
-        # 先回收上一个 zombie（如果有）
+        # 批量收割所有 zombie 子进程（POSIX waitpid -1 + WNOHANG）
+        import os as _os
+        while True:
+            try:
+                _zpid, _ = _os.waitpid(-1, _os.WNOHANG)
+                if _zpid == 0:
+                    break
+            except ChildProcessError:
+                break
+            except Exception:
+                break
+
+        # 回收上一个 child（兜底）
         try:
             if "prev_child" in dir() and prev_child is not None:
                 prev_child.wait(timeout=0)
