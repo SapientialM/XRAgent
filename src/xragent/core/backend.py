@@ -149,14 +149,40 @@ class LangChainBackend:
 def _to_lc_tool(spec: ToolSpec):
     """包装 XRAgent 的 ToolSpec 为 LangChain StructuredTool。
 
-    实际执行在 xragent ToolRegistry 里；这里只给 LangChain 提供 schema 与 name。
+    用 Pydantic 模型作为 args_schema；这样 LangChain 不会把参数打包成 kwargs dict，
+    而是按 schema 字段名正确展开。
     """
+    from typing import Any
     from langchain_core.tools import StructuredTool
-    fn = lambda **kwargs: kwargs  # noqa: E731 — placeholder
+    from pydantic import BaseModel, Field, create_model
+
+    schema = spec.input_schema or {"type": "object", "properties": {}}
+    props = schema.get("properties", {}) or {}
+    required = set(schema.get("required", []) or [])
+
+    field_defs: dict[str, tuple] = {}
+    for pname, pschema in props.items():
+        desc = pschema.get("description", "") if isinstance(pschema, dict) else ""
+        if pname in required:
+            field_defs[pname] = (Any, Field(description=desc))
+        else:
+            default = pschema.get("default", None) if isinstance(pschema, dict) else None
+            field_defs[pname] = (Any, Field(default=default, description=desc))
+
+    if not field_defs:
+        # 无参数工具：构造一个 dummy field 以满足 Pydantic
+        field_defs = {"_": (Any, Field(default=None, description=""))}
+
+    ArgsModel = create_model(f"{spec.name}_args", **field_defs)
+
+    def _placeholder(**kwargs):
+        return kwargs
+
     return StructuredTool.from_function(
-        func=fn,
+        func=_placeholder,
         name=spec.name,
         description=spec.description,
+        args_schema=ArgsModel,
     )
 
 
