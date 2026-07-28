@@ -13,10 +13,12 @@ from . import runtime_state as rs
 
 
 def _spawn_child(extra_args: list[str] | None = None) -> subprocess.Popen:
-    """按 XRAGENT_SPAWN_MODE 决定 spawn autonomous 还是 supervised 子 Agent。
+    """Spawn 子 Agent；显式把 .env 内容注入子进程 env。
 
-    默认 autonomous（自驱动循环，无需 stdin/HTTP）。
-    设 XRAGENT_SPAWN_MODE=supervised 退回交互式。
+    不依赖 pydantic-settings 自己读 .env（pydantic-settings 不会把 env var 注入 os.environ，
+    且子进程的 cwd=仓库根，理论上能读，但为了稳健性这里直接传 env）。
+
+    spawn 模式由 XRAGENT_SPAWN_MODE 控制：autonomous（默认）/ supervised。
     """
     import os
     s = get_settings()
@@ -26,9 +28,24 @@ def _spawn_child(extra_args: list[str] | None = None) -> subprocess.Popen:
     else:
         mode_args = ["--as-supervised"]
     cmd = [sys.executable, "-m", "xragent.main", *mode_args, *(extra_args or [])]
+
+    # 父进程 env + .env 解析
+    child_env = os.environ.copy()
+    env_path = s.repo_root / ".env"
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key:
+                child_env.setdefault(key, val)  # 不覆盖已有（launchd 显式设的优先）
+
     return subprocess.Popen(
         cmd, cwd=str(s.repo_root), stdout=sys.stdout, stderr=sys.stderr,
-        start_new_session=True,
+        start_new_session=True, env=child_env,
     )
 
 
