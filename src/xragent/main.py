@@ -260,8 +260,22 @@ def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
 
             record_done(task, out.get("turn_id", "n/a"), summary)
             print(f"[autonomous] done in {out.get('wall_ms', 0)}ms; sleep {interval_s}s", flush=True)
+            # 父母消息插队：每轮 sleep 前消费（高优先级）
+            try:
+                while not parent_msg_queue.empty():
+                    parent_text = parent_msg_queue.get_nowait()
+                    if parent_text:
+                        print(f"[autonomous instance={instance_id}] parent message: {parent_text[:80]}", flush=True)
+                        try:
+                            p_out = loop.run(f"[from parent] {parent_text}")
+                            reply = (p_out.get('answer') or '')[:300]
+                            print(f"[autonomous] parent reply: {reply}", flush=True)
+                        except Exception as e:
+                            print(f"[autonomous] parent reply error: {e}", flush=True)
+            except Exception as e:
+                print(f"[autonomous] queue consume err: {e}", flush=True)
+
             time.sleep(interval_s)
-            # check 周期 push（即使本轮没 commit 也能推之前累积的）
             maybe_periodic_push(force=False)
     finally:
         rs.heartbeat({"autonomous": False, "rounds": rounds})
