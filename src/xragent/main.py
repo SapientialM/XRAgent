@@ -146,25 +146,54 @@ def cmd_serve(freeze: bool) -> int:
 
 
 def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
-    """自驱动循环：无人值守也能跑。"""
+    """自驱动循环：无人值守也能跑；同时开 HTTP 通道让父母能随时插队。"""
     s = get_settings()
-    print(f"[autonomous] pid={os.getpid()} interval={interval_s}s max_rounds={max_rounds or 'inf'}", flush=True)
-    rs.heartbeat({"autonomous": True, "interval_s": interval_s})
+    # instance 标（让 log 不再"永远是 round 1"——能看到 supervisor 每次 spawn 的 child 实例）
+    instance_id = time.strftime("%H%M%S")
+    print(f"[autonomous] pid={os.getpid()} instance={instance_id} interval={interval_s}s max_rounds={max_rounds or 'inf'}", flush=True)
+    rs.heartbeat({"autonomous": True, "interval_s": interval_s, "instance": instance_id})
 
-    from .autonomous import next_task, record_done
+    from .autonomous import next_task, record_done, task_queue_path
     from .snapshot.side_git import SideGit
 
     stop = {"v": False}
 
     def _handle_term(signum, frame):
         stop["v"] = True
-        print(f"\n[autonomous] received signal {signum}; will exit after current round", flush=True)
+        print(f"\n[autonomous instance={instance_id}] received signal {signum}; will exit after current round", flush=True)
     _signal.signal(_signal.SIGTERM, _handle_term)
     _signal.signal(_signal.SIGINT, _handle_term)
+
+    # 父母 HTTP 通道：POST /message 把消息注入主循环（高优先级插队）
+    from .http_server import start_server_background, register_input_queue
+    import queue as _queue
+    parent_msg_queue: "_queue.Queue[str]" = _queue.Queue()
+    register_input_queue(parent_msg_queue)
+    try:
+        start_server_background(loop)  # 注意：loop 此时还没定义，下面会重新 start
+    except Exception:
+        pass
+
+    # 异步 heartbeat 线程：每 5s 写一次（即使 LLM 调用 30s+ supervisor 也不误判超时）
+    import threading as _threading
+    def _heartbeat_loop():
+        while not stop["v"]:
+            try:
+                rs.heartbeat()
+            except Exception:
+                pass
+            stop["v"] or _threading.Event().wait(5)
+    _threading.Thread(target=_heartbeat_loop, daemon=True).start()
 
     # autonomous 模式不打 turn tag（30s 一轮会刷屏 2000+/天）；只保留 stash 供 rollback
     loop = ReActLoop(on_heartbeat=rs.heartbeat, max_steps=40, tag_snapshots=False)
     sg = SideGit()
+    # 真启动 HTTP server（接受 POST /message）
+    try:
+        start_server_background(loop)
+        print(f"[autonomous instance={instance_id}] HTTP on http://{s.http_host}:{s.http_port}/  (POST /message 即可插队)", flush=True)
+    except OSError as e:
+        print(f"[autonomous instance={instance_id}] HTTP server bind failed: {e}", flush=True)
     rounds = 0
     last_push_ts = 0.0  # 0 = 下一次 commit 后立即 push；之后每 push_interval_minutes push 一次
     push_interval_s = max(60, s.push_interval_minutes * 60)
