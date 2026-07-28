@@ -172,7 +172,7 @@ def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
 
     # 独立线程消费 parent_msg_queue：有 message 立刻打断 round
     # 用 threading.Event 让主循环感知"被打断"
-    interrupt_event = _threading.Event()
+    interrupt_event = threading.Event()
 
     def _parent_consumer():
         while not stop["v"]:
@@ -197,7 +197,7 @@ def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
             except Exception:
                 pass
 
-    _threading.Thread(target=_parent_consumer, daemon=True).start()
+    threading.Thread(target=_parent_consumer, daemon=True).start()
     try:
         start_server_background(loop)  # 注意：loop 此时还没定义，下面会重新 start
     except Exception:
@@ -211,8 +211,8 @@ def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
                 rs.heartbeat()
             except Exception:
                 pass
-            stop["v"] or _threading.Event().wait(5)
-    _threading.Thread(target=_heartbeat_loop, daemon=True).start()
+            stop["v"] or threading.Event().wait(5)
+    threading.Thread(target=_heartbeat_loop, daemon=True).start()
 
     # autonomous 模式不打 turn tag（30s 一轮会刷屏 2000+/天）；只保留 stash 供 rollback
     loop = ReActLoop(on_heartbeat=rs.heartbeat, max_steps=40, tag_snapshots=False)
