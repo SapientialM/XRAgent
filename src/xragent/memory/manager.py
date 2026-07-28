@@ -5,7 +5,6 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from ..config.settings import get_settings
 
@@ -26,7 +25,12 @@ class MemoryManager:
     #      WHERE category = ? AND content LIKE ? ORDER BY ts DESC LIMIT ?
     #    Filters by category AND keeps ts DESC ordering, so LIMIT can short-circuit.
     # 2. (ts DESC) alone kept for recent() and category-less recall().
-    # 3. Old single-column idx_facts_category is a prefix of the composite and is
+    # 3. (source_turn) index supports future per-turn audit/revert queries
+    #    (e.g. "list all facts saved by turn t1" or "delete facts by turn").
+    #    The current API never queries by source_turn, but the column is
+    #    populated on every save_fact() and the index is cheap; it removes
+    #    a full scan if that pattern emerges.
+    # 4. Old single-column idx_facts_category is a prefix of the composite and is
     #    therefore redundant; existing DBs may still carry it (harmless).
     SCHEMA = """
     CREATE TABLE IF NOT EXISTS facts (
@@ -38,6 +42,7 @@ class MemoryManager:
     );
     CREATE INDEX IF NOT EXISTS idx_facts_category_ts ON facts(category, ts DESC);
     CREATE INDEX IF NOT EXISTS idx_facts_ts ON facts(ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_facts_source_turn ON facts(source_turn);
     """
 
     def __init__(self, db_path: Path | None = None):
@@ -45,6 +50,13 @@ class MemoryManager:
         self.db_path = db_path or s.memory_db
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path))
+        # PRAGMA 必须在 CREATE TABLE 之前: SQLite 允许中途切换,但 WAL 在
+        # 第一次写入时就锁定, 先设更安全。两项都是 SQLite 长期记忆场景
+        # 的标准优化:
+        #   - journal_mode=WAL     读写不阻塞, N 个 recall 不再互锁 save
+        #   - synchronous=NORMAL   WAL 模式下仍耐崩溃, 但省掉每次 commit 的 fsync
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.executescript(self.SCHEMA)
         self._conn.commit()
 
