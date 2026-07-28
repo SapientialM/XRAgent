@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# XRAgent 守护进程管理：launchd 装载 + tmux 启动
+set -e
+
+REPO="/Users/cm/Work/WorkSpace/XRAgent"
+PLIST_SRC="$REPO/scripts/launchd/com.xragent.supervisor.plist"
+PLIST_DST="$HOME/Library/LaunchAgents/com.xragent.supervisor.plist"
+LABEL="com.xragent.supervisor"
+
+cmd="${1:-help}"
+
+case "$cmd" in
+    launchd-install)
+        mkdir -p "$HOME/Library/LaunchAgents"
+        cp "$PLIST_SRC" "$PLIST_DST"
+        echo "✓ plist installed to $PLIST_DST"
+        ;;
+    launchd-uninstall)
+        launchctl unload "$PLIST_DST" 2>/dev/null || true
+        rm -f "$PLIST_DST"
+        echo "✓ plist removed"
+        ;;
+    launchd-start)
+        launchctl load -w "$PLIST_DST" 2>&1 || launchctl start "$LABEL"
+        echo "✓ launched via launchd"
+        ;;
+    launchd-stop)
+        launchctl stop "$LABEL" 2>&1 || true
+        echo "✓ stopped"
+        ;;
+    launchd-status)
+        launchctl list | grep -i xragent || echo "(not loaded)"
+        ;;
+    tmux-start)
+        tmux kill-session -t xragent 2>/dev/null || true
+        tmux new-session -d -s xragent -c "$REPO" \
+            'PYTHONPATH=src XRAGENT_HEARTBEAT_INTERVAL_S=10 XRAGENT_HEARTBEAT_TIMEOUT_S=60 \
+             python3.11 -u -m xragent.watchdog.supervisor 2>&1 | tee logs/supervisor.tmux.log'
+        echo "✓ tmux session 'xragent' started. attach: tmux attach -t xragent"
+        ;;
+    tmux-stop)
+        tmux kill-session -t xragent 2>/dev/null && echo "✓ killed" || echo "(not running)"
+        ;;
+    tmux-attach)
+        tmux attach -t xragent
+        ;;
+    status)
+        echo "=== launchd ==="
+        launchctl list 2>/dev/null | grep -i xragent || echo "(not loaded)"
+        echo "=== tmux ==="
+        tmux ls 2>/dev/null | grep xragent || echo "(no session)"
+        echo "=== runtime_state ==="
+        if [ -f "$REPO/runtime_state.json" ]; then
+            cat "$REPO/runtime_state.json" | head -20
+        else
+            echo "(no runtime_state.json)"
+        fi
+        echo "=== process tree ==="
+        pgrep -fl 'xragent' || echo "(no xragent process)"
+        ;;
+    logs)
+        tail -f "$REPO/logs/supervisor.out.log" "$REPO/logs/supervisor.err.log" 2>/dev/null
+        ;;
+    help|*)
+        cat <<USAGE
+XRAgent 管理
+
+前台/调试：
+  scripts/xragent-supervisor            # 前台跑（Ctrl-C 终止）
+
+tmux（终端断了能恢复）：
+  scripts/manage tmux-start             # 后台跑 supervisor
+  scripts/manage tmux-attach            # 进入会话看日志
+  scripts/manage tmux-stop              # 停止
+  scripts/manage status                 # 看所有状态
+
+launchd（系统级 24h，含重启机器）：
+  scripts/manage launchd-install        # 复制 plist 到 ~/Library/LaunchAgents
+  scripts/manage launchd-start          # 启动
+  scripts/manage launchd-stop           # 停止
+  scripts/manage launchd-uninstall      # 卸载
+
+日志：
+  scripts/manage logs                   # tail supervisor 日志
+USAGE
+        ;;
+esac

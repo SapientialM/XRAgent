@@ -185,4 +185,4 @@ PYTHONPATH=src python3.11 -m pytest tests/ -v
 
 ## ⚖️ License
 
-MIT
+Apache License

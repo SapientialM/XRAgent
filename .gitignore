@@ -8,3 +8,5 @@ memory/long_term/facts.db-journal
 runtime_state.json
 diary/turns/
 .pytest_cache/
+logs/
+.run/
