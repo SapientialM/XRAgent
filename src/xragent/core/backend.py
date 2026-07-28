@@ -99,9 +99,9 @@ class LangChainBackend:
         self._impl = self._build_impl()
 
     def _build_impl(self):
-        from langchain_community.chat_models import ChatOpenAI
+        from langchain_openai import ChatOpenAI
         return ChatOpenAI(
-            model=self.settings.llm_model,
+            model=self.settings.active_model,
             temperature=self.settings.llm_temperature,
             max_tokens=self.settings.llm_max_tokens,
             openai_api_key=self.settings.active_api_key or "missing",
@@ -147,21 +147,33 @@ class LangChainBackend:
 
 
 def _to_lc_tool(spec: ToolSpec):
-    from langchain_core.tools import tool
+    """包装 XRAgent 的 ToolSpec 为 LangChain StructuredTool。
 
-    @tool
-    def _wrapped(**kwargs):
-        return kwargs
+    实际执行在 xragent ToolRegistry 里；这里只给 LangChain 提供 schema 与 name。
+    """
+    from langchain_core.tools import StructuredTool
+    fn = lambda **kwargs: kwargs  # noqa: E731 — placeholder
+    return StructuredTool.from_function(
+        func=fn,
+        name=spec.name,
+        description=spec.description,
+    )
 
-    _wrapped.name = spec.name
-    _wrapped.description = spec.description
-    _wrapped.args = spec.input_schema
-    return _wrapped
+
+# MiniMax provider id alias
+_MINIMAXI_ALIASES = {"minimaxi", "minimax", "minimax-ai", "minimax_ai"}
+
+
+def _normalize_provider(provider: str) -> str:
+    if provider in _MINIMAXI_ALIASES:
+        return "minimaxi"
+    return provider
 
 
 def get_backend() -> BackendProtocol:
     s = get_settings()
-    if s.llm_provider == "mock":
+    provider = _normalize_provider(s.llm_provider)
+    if provider == "mock":
         return MockBackend()
     if not s.active_api_key:
         return MockBackend()
