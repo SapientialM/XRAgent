@@ -169,6 +169,35 @@ def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
     import queue as _queue
     parent_msg_queue: "_queue.Queue[str]" = _queue.Queue()
     register_input_queue(parent_msg_queue)
+
+    # 独立线程消费 parent_msg_queue：有 message 立刻打断 round
+    # 用 threading.Event 让主循环感知"被打断"
+    interrupt_event = _threading.Event()
+
+    def _parent_consumer():
+        while not stop["v"]:
+            try:
+                parent_text = parent_msg_queue.get(timeout=1.0)
+                if not parent_text:
+                    continue
+                print(f"[autonomous instance={instance_id}] parent message (interrupting): {parent_text[:80]}", flush=True)
+                # 立刻设 interrupt flag，让主循环跳出当前 round
+                interrupt_event.set()
+                # 跑 parent reply
+                try:
+                    p_out = loop.run(f"[from parent] {parent_text}")
+                    reply = (p_out.get('answer') or '')[:300]
+                    last_answer_box['answer'] = p_out.get('answer') or ''
+                    last_answer_box['ts'] = time.time()
+                    print(f"[autonomous] parent reply: {reply}", flush=True)
+                except Exception as e:
+                    print(f"[autonomous] parent reply error: {e}", flush=True)
+                # 跑完后清 flag
+                interrupt_event.clear()
+            except Exception:
+                pass
+
+    _threading.Thread(target=_parent_consumer, daemon=True).start()
     try:
         start_server_background(loop)  # 注意：loop 此时还没定义，下面会重新 start
     except Exception:
@@ -264,23 +293,7 @@ def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
 
             record_done(task, out.get("turn_id", "n/a"), summary)
             print(f"[autonomous] done in {out.get('wall_ms', 0)}ms; sleep {interval_s}s", flush=True)
-            # 父母消息插队：每轮 sleep 前消费（高优先级）
-            try:
-                while not parent_msg_queue.empty():
-                    parent_text = parent_msg_queue.get_nowait()
-                    if parent_text:
-                        print(f"[autonomous instance={instance_id}] parent message: {parent_text[:80]}", flush=True)
-                        try:
-                            p_out = loop.run(f"[from parent] {parent_text}")
-                            reply = (p_out.get('answer') or '')[:300]
-                            last_answer_box['answer'] = p_out.get('answer') or ''
-                            last_answer_box['ts'] = time.time()
-                            print(f"[autonomous] parent reply: {reply}", flush=True)
-                        except Exception as e:
-                            print(f"[autonomous] parent reply error: {e}", flush=True)
-            except Exception as e:
-                print(f"[autonomous] queue consume err: {e}", flush=True)
-
+            # 独立线程处理 parent_msg（不等 sleep；interrupt_event 也通知主循环）
             time.sleep(interval_s)
             maybe_periodic_push(force=False)
     finally:
