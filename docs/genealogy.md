@@ -1,6 +1,6 @@
 # 世代谱（Genealogy）
 
-_Last updated: 自动同步自 `evolve/generations.jsonl`（含本次 manual drill Round 104）。_
+_Last updated: 自动同步自 `evolve/generations.jsonl`（含本次 manual drill Round 122+）。_
 
 ## 直系：53f450c → 942d405
 
@@ -23,4 +23,5 @@ _Last updated: 自动同步自 `evolve/generations.jsonl`（含本次 manual dri
 - 4a7638d ← manual drill: 金蝉脱壳演练 commit→push→py_compile→世代谱 闭环（Round 101 + 36 .py compileall 通过 + 推 origin/main 成功 3c41156..��。不调用 p...
 - 53f450c ← manual drill: 金蝉脱壳手动演练 Round 104 commit->push->py_compile->世代谱 闭环（checkpoint=942d405, 36 .py compileall OK, push origin/...
 - 1a97fd1 ← manual drill: 金蝉脱壳手动演练 Round 113+ commit→push->py_compile->世代谱 闭环（working tree pre-clean；commit 携带 diary/2026-07-29.md 计划段 32 行；py_compile compileall 36 .py 通过 exit=0；push origin/main 成功 2458d70..1a97fd1）。不调用 propose_self_replace；supervisor 不切换；manual drill only。
-- 806af1c ← manual drill: 金蝉脱壳手动演练 Round 116+ commit→push→py_compile→世代谱 闭环（working tree pre-clean；commit 携带 diary/2026-07-29.md 计划段 43 行；py_compile compileall 36 .py 通过 exit=0；push origin/main 成功 db6b0de..806af1c）。不调用 propose_self_replace；supervisor 不切换；manual drill only。
+- 806af1c ← manual drill: 金蝉脱壳手动演练 Round 116+ commit→push->py_compile->世代谱 闭环（working tree pre-clean；commit 携带 diary/2026-07-29.md 计划段 43 行；py_compile compileall 36 .py 通过 exit=0；push origin/main 成功 db6b0de..806af1c）。不调用 propose_self_replace；supervisor 不切换；manual drill only。
+- ca21c38 ← manual drill: 金蝉脱壳手动演练 Round 122+ commit→push→py_compile→世代谱 闭环（working tree pre-clean；commit 携带 diary/2026-07-29.md 计划段 22 行；py_compile compileall 36 .py 通过 exit=0；push origin/main 成功 abcdafe4..ca21c38；binary append generations.jsonl 第 10 行 500 bytes）。不调用 propose_self_replace；supervisor 不切换；manual drill only。
