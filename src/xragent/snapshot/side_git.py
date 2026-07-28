@@ -66,32 +66,23 @@ class SideGit:
             out.append(f":!{item}{suffix}")
         return out
 
-    def snapshot(self, turn_id: str, note: str = "") -> Snapshot:
+    def snapshot(self, turn_id, note="", tag=True):
         self.ensure_repo()
         pre_stash = None
         if self._has_changes():
             try:
-                # pathspec 排除项 — 必须以 -- 与前面的 options 分隔
-                # 但 stash push -u 时 pathspec 只对 tracked 生效；
-                # untracked 文件必须单独用 .gitignore-style exclude。
-                # 所以这里用 --include-untracked + -- ':!untracked/*' 不行；
-                # 改方案：把所有 untracked 但属于"源代码"的加到 git add 然后 stash，
-                # 或用 .git/info/exclude 临时屏蔽（侵入性大）。
-                #
-                # 实际最简方案：snapshot 只 stash tracked + modified 的改动；
-                # untracked 文件留在 working tree。ReAct 写出的 diary/memory 等
-                # 本身是 untracked，会被 SideGit 标记为 working tree dirty
-                # 而不被 stash。
                 self._run("stash", "push", "-m", f"xragent-pre-{turn_id}")
                 pre_stash = f"xragent-pre-{turn_id}"
             except RuntimeError:
                 pre_stash = None
-        tag = f"xragent/turn-{turn_id}"
-        try:
-            self._run("tag", "-f", tag, "-m", note[:200])
-        except RuntimeError:
-            pass
-        return Snapshot(tag=tag, pre_stash=pre_stash, note=note)
+        tag_name = ""
+        if tag:
+            tag_name = f"xragent/turn-{turn_id}"
+            try:
+                self._run("tag", "-f", tag_name, "-m", note[:200])
+            except RuntimeError:
+                tag_name = ""
+        return Snapshot(tag=tag_name, pre_stash=pre_stash, note=note)
 
     def restore(self, tag: str) -> None:
         self._run("checkout", tag)
