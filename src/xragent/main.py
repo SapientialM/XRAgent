@@ -188,6 +188,10 @@ def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
     # autonomous 模式不打 turn tag（30s 一轮会刷屏 2000+/天）；只保留 stash 供 rollback
     loop = ReActLoop(on_heartbeat=rs.heartbeat, max_steps=40, tag_snapshots=False)
     sg = SideGit()
+    # 注册全局 last_answer sink：每次 loop.run() 跑完自动写到 /last-answer
+    from .http_server import register_answer_sink
+    last_answer_box = {"answer": "", "ts": 0.0}
+    register_answer_sink(last_answer_box)
     # 真启动 HTTP server（接受 POST /message）
     try:
         start_server_background(loop)
@@ -269,6 +273,8 @@ def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
                         try:
                             p_out = loop.run(f"[from parent] {parent_text}")
                             reply = (p_out.get('answer') or '')[:300]
+                            last_answer_box['answer'] = p_out.get('answer') or ''
+                            last_answer_box['ts'] = time.time()
                             print(f"[autonomous] parent reply: {reply}", flush=True)
                         except Exception as e:
                             print(f"[autonomous] parent reply error: {e}", flush=True)
