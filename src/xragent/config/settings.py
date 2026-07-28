@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     # === 五核心 · 成长开关 ===
     evolution_enabled: bool = True
 
+    # === Push cadence（autonomous 模式每 N 分钟批量 push 一次，避免每次 commit 都 push） ===
+    push_interval_minutes: int = 30
+
     # === Watchdog ===
     heartbeat_interval_s: int = 10
     heartbeat_timeout_s: int = 60

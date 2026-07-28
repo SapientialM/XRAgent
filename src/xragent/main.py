@@ -9,6 +9,7 @@ import argparse
 import os
 import queue
 import signal as _signal
+import subprocess
 import sys
 import threading
 import time
@@ -165,6 +166,36 @@ def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
     loop = ReActLoop(on_heartbeat=rs.heartbeat, max_steps=40, tag_snapshots=False)
     sg = SideGit()
     rounds = 0
+    last_push_ts = 0.0  # 0 = 下一次 commit 后立即 push；之后每 push_interval_minutes push 一次
+    push_interval_s = max(60, s.push_interval_minutes * 60)
+
+    def maybe_periodic_push(force: bool = False):
+        nonlocal last_push_ts
+        now = time.time()
+        if not force and last_push_ts and (now - last_push_ts) < push_interval_s:
+            return
+        # 只在有未推 commit 时 push（HEAD 比 origin/main 新）
+        try:
+            ahead = subprocess.run(
+                ["git", "rev-list", "--count", "origin/main..HEAD"],
+                cwd=str(s.repo_root), capture_output=True, text=True, timeout=5,
+            )
+            n = int(ahead.stdout.strip() or 0)
+        except Exception:
+            n = 0
+        if n == 0:
+            last_push_ts = now
+            return
+        try:
+            ok, msg = sg.push()
+            if ok:
+                print(f"[autonomous] pushed {n} commit(s) to origin/main", flush=True)
+            else:
+                print(f"[autonomous] push returned ok=False: {msg[:200]}", flush=True)
+            last_push_ts = now
+        except Exception as e:
+            print(f"[autonomous] push failed: {e}", flush=True)
+
     try:
         while not stop["v"]:
             rounds += 1
@@ -193,12 +224,16 @@ def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
                 head = sg.add_all_and_commit(f"autonomous: {task['title'][:60]} (round {rounds})")
                 if head:
                     print(f"[autonomous] committed {head[:8]}", flush=True)
+                    # 第一次 commit 后立即 push；之后每 push_interval_minutes
+                    maybe_periodic_push(force=(last_push_ts == 0.0))
             except Exception as e:
                 print(f"[autonomous] commit failed: {e}", flush=True)
 
             record_done(task, out.get("turn_id", "n/a"), summary)
             print(f"[autonomous] done in {out.get('wall_ms', 0)}ms; sleep {interval_s}s", flush=True)
             time.sleep(interval_s)
+            # check 周期 push（即使本轮没 commit 也能推之前累积的）
+            maybe_periodic_push(force=False)
     finally:
         rs.heartbeat({"autonomous": False, "rounds": rounds})
         print(f"[autonomous] exited after {rounds} rounds", flush=True)
