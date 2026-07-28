@@ -13,8 +13,19 @@ from . import runtime_state as rs
 
 
 def _spawn_child(extra_args: list[str] | None = None) -> subprocess.Popen:
+    """按 XRAGENT_SPAWN_MODE 决定 spawn autonomous 还是 supervised 子 Agent。
+
+    默认 autonomous（自驱动循环，无需 stdin/HTTP）。
+    设 XRAGENT_SPAWN_MODE=supervised 退回交互式。
+    """
+    import os
     s = get_settings()
-    cmd = [sys.executable, "-m", "xragent.main", "--as-supervised", *(extra_args or [])]
+    mode = os.environ.get("XRAGENT_SPAWN_MODE", "autonomous").lower()
+    if mode == "autonomous":
+        mode_args = ["--autonomous", "--interval", str(max(30, s.heartbeat_interval_s))]
+    else:
+        mode_args = ["--as-supervised"]
+    cmd = [sys.executable, "-m", "xragent.main", *mode_args, *(extra_args or [])]
     return subprocess.Popen(
         cmd, cwd=str(s.repo_root), stdout=sys.stdout, stderr=sys.stderr,
         start_new_session=True,
