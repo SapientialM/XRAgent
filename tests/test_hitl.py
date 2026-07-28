@@ -1,6 +1,8 @@
 """HITL Gate 三态决策。"""
 from __future__ import annotations
 
+import pytest
+
 from xragent.hitl.gate import (
     ApprovalRequest,
     ApprovalResult,
@@ -9,16 +11,29 @@ from xragent.hitl.gate import (
 )
 
 
-def test_approve_all_default():
+@pytest.fixture(autouse=True)
+def _force_interactive(monkeypatch):
+    """所有 HITL 测试都跑在 interactive 模式（避开 .env 的 approve-all）。"""
+    monkeypatch.setenv("XRAGENT_HITL_DEFAULT", "interactive")
+    from xragent.config import settings as sm
+    sm.reset_settings_cache()
+    yield
+
+
+def test_approve_all_default(monkeypatch):
+    monkeypatch.setenv("XRAGENT_HITL_DEFAULT", "approve-all")
+    from xragent.config import settings as sm
+    sm.reset_settings_cache()
     gate = HitlGate()
-    gate.default = "approve-all"
     r = gate.request(ApprovalRequest("write_file", {"path": "x"}, "high", "test"))
     assert r.decision == Decision.APPROVE
 
 
-def test_reject_all_default():
+def test_reject_all_default(monkeypatch):
+    monkeypatch.setenv("XRAGENT_HITL_DEFAULT", "reject-all")
+    from xragent.config import settings as sm
+    sm.reset_settings_cache()
     gate = HitlGate()
-    gate.default = "reject-all"
     r = gate.request(ApprovalRequest("write_file", {"path": "x"}, "high", "test"))
     assert r.decision == Decision.REJECT
 
