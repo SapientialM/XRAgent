@@ -29,6 +29,7 @@ class ReActLoop:
         gate: HitlGate | None = None, recorder: TraceRecorder | None = None,
         memory: MemoryManager | None = None, snapshot: SideGit | None = None,
         max_steps: int = 16, on_heartbeat: Callable[[], None] | None = None,
+        tag_snapshots: bool = True,
     ):
         self.settings = get_settings()
         self.backend = backend
@@ -39,6 +40,7 @@ class ReActLoop:
         self.snapshot = snapshot or SideGit()
         self.max_steps = max_steps
         self.on_heartbeat = on_heartbeat or (lambda: None)
+        self.tag_snapshots = tag_snapshots
 
     def _ensure_backend(self) -> BackendProtocol:
         if self.backend is None:
@@ -50,7 +52,7 @@ class ReActLoop:
         backend = self._ensure_backend()
         s = self.settings
         turn_id = new_turn_id()
-        snap = self.snapshot.snapshot(turn_id, note=f"pre-turn:{user_text[:40]}")
+        snap = self.snapshot.snapshot(turn_id, note=f"pre-turn:{user_text[:40]}", tag=self.tag_snapshots)
 
         messages: list[Message] = session_messages or []
         if not messages or messages[0].role != "system":
@@ -112,7 +114,7 @@ class ReActLoop:
         except Exception:
             pass
 
-        self.snapshot.snapshot(turn_id + "-post", note=f"post-turn:{user_text[:40]}")
+        self.snapshot.snapshot(turn_id + "-post", note=f"post-turn:{user_text[:40]}", tag=self.tag_snapshots)
 
         return {
             "turn_id": turn_id, "answer": final_content,
