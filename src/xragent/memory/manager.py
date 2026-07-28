@@ -20,6 +20,14 @@ class Fact:
 
 
 class MemoryManager:
+    # Schema notes:
+    # 1. (category, ts DESC) composite index covers recall()'s two main patterns:
+    #      WHERE category = ? ORDER BY ts DESC LIMIT ?
+    #      WHERE category = ? AND content LIKE ? ORDER BY ts DESC LIMIT ?
+    #    Filters by category AND keeps ts DESC ordering, so LIMIT can short-circuit.
+    # 2. (ts DESC) alone kept for recent() and category-less recall().
+    # 3. Old single-column idx_facts_category is a prefix of the composite and is
+    #    therefore redundant; existing DBs may still carry it (harmless).
     SCHEMA = """
     CREATE TABLE IF NOT EXISTS facts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,7 +36,7 @@ class MemoryManager:
       content TEXT NOT NULL,
       source_turn TEXT
     );
-    CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
+    CREATE INDEX IF NOT EXISTS idx_facts_category_ts ON facts(category, ts DESC);
     CREATE INDEX IF NOT EXISTS idx_facts_ts ON facts(ts DESC);
     """
 
