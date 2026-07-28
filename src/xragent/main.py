@@ -55,7 +55,7 @@ def cmd_interactive(freeze: bool, with_http: bool = False) -> int:
         os.environ["XRAGENT_EVOLUTION_ENABLED"] = "false"
         reset_settings_cache()
     _print_hello()
-    loop = ReActLoop(on_heartbeat=rs.heartbeat)
+    loop = ReActLoop(on_heartbeat=rs.heartbeat, max_steps=24)
     s = get_settings()
     stop_event = threading.Event()
     input_queue: "queue.Queue" = queue.Queue()
@@ -160,7 +160,7 @@ def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
     _signal.signal(_signal.SIGTERM, _handle_term)
     _signal.signal(_signal.SIGINT, _handle_term)
 
-    loop = ReActLoop(on_heartbeat=rs.heartbeat)
+    loop = ReActLoop(on_heartbeat=rs.heartbeat, max_steps=24)
     sg = SideGit()
     rounds = 0
     try:

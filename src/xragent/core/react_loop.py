@@ -28,7 +28,7 @@ class ReActLoop:
         self, backend: BackendProtocol | None = None, registry: ToolRegistry | None = None,
         gate: HitlGate | None = None, recorder: TraceRecorder | None = None,
         memory: MemoryManager | None = None, snapshot: SideGit | None = None,
-        max_steps: int = 8, on_heartbeat: Callable[[], None] | None = None,
+        max_steps: int = 16, on_heartbeat: Callable[[], None] | None = None,
     ):
         self.settings = get_settings()
         self.backend = backend
