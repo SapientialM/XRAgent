@@ -14,3 +14,4 @@
 {"ts": 1785250929.6782541, "title": "金蝉脱壳演练", "turn_id": "n/a", "summary": "exception: SideGit.snapshot() got an unexpected keyword argument 'tag'"}
 {"ts": 1785250959.774668, "title": "审视代码", "turn_id": "n/a", "summary": "exception: SideGit.snapshot() got an unexpected keyword argument 'tag'"}
 {"ts": 1785251005.884842, "title": "金蝉脱壳演练", "turn_id": "20260728-230005-232", "summary": "<think>Now I need to clearly ask the parent to choose. Let me lay out the options clearly without executing anything destructive.</think>\n\n请父辈明示走哪条路，我立刻执行：\n\n| 选项 | 动作 | 后果 |\n|---|---|---|\n| **A. 复用 drill #3 协议** | 只写 diary（记录本次预检结果），不动 git / 不入谱 | 最稳。HEAD 不动，drill #4 作为\"又一次发现同一破损\"被诚实记下 |\n| **B. 先修 b"}
+{"ts": 1785251110.3600378, "title": "改善工具", "turn_id": "n/a", "summary": "exception: SideGit.snapshot() got an unexpected keyword argument 'tag'"}
