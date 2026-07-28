@@ -43,6 +43,10 @@ def _spawn_child(extra_args: list[str] | None = None) -> subprocess.Popen:
             if key:
                 child_env.setdefault(key, val)  # 不覆盖已有（launchd 显式设的优先）
 
+    # 强制覆盖 PATH（launchd 默认 PATH 太短，没 /opt/homebrew/bin → git/python3 找不到）
+    child_env["PATH"] = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    child_env.setdefault("HOME", "/Users/cm")
+    child_env.setdefault("USER", "cm")
     return subprocess.Popen(
         cmd, cwd=str(s.repo_root), stdout=sys.stdout, stderr=sys.stderr,
         start_new_session=True, env=child_env,
