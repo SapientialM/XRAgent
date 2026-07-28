@@ -58,7 +58,15 @@ def run_forever() -> None:
         if state.get("restart_suppressed"):
             print("[supervisor] restart_suppressed detected; exit.", flush=True)
             return
+        # 先回收上一个 zombie（如果有）
+        try:
+            if "prev_child" in dir() and prev_child is not None:
+                prev_child.wait(timeout=0)
+        except Exception:
+            pass
+
         child = _spawn_child()
+        prev_child = child
         print(f"[supervisor] spawned child pid={child.pid}", flush=True)
         last_heartbeat_seen = rs.read().get("heartbeat_ts", 0)
         try:
@@ -66,6 +74,11 @@ def run_forever() -> None:
                 rc = child.poll()
                 if rc is not None:
                     print(f"[supervisor] child exited rc={rc}", flush=True)
+                    # 回收 zombie
+                    try:
+                        child.wait(timeout=0)
+                    except Exception:
+                        pass
                     if rc == 0 and state.get("restart_suppressed"):
                         return
                     break
