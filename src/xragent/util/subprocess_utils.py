@@ -13,7 +13,7 @@ text=True, [encoding=...], [timeout=...])`` 这串 5+ 行 kwargs, 区别只在�
 
 抽到 ``run_capture`` 后调用方只关心 ``(rc, out, err)`` 元组, 不再各写一遍 kwargs;
 异常处理收敛到一处 (``TimeoutExpired`` / ``FileNotFoundError`` / ``OSError``
-统一吞掉 → ``rc = -1``)。
+统一吞掉 → ``rc = RC_RUNTIME_FAIL``)。
 
 **测试影响**:
 tests/test_git_tools.py 用 ``monkeypatch.setattr(side_git.subprocess, "run", fake_run)``
@@ -27,6 +27,16 @@ import subprocess
 from pathlib import Path
 
 
+# ``returncode`` 哨兵: 表示"运行过程本身失败"（timeout / binary 缺失 / OS error）,
+# 而不是 subprocess 自身返回的退出码。调用方可用 ``rc < 0`` 或 ``rc == RC_RUNTIME_FAIL`` 判断。
+RC_RUNTIME_FAIL: int = -1
+
+
+def _to_tuple(result: subprocess.CompletedProcess) -> tuple[int, str, str]:
+    """CompletedProcess → (rc, out, err); stdout/stderr 自动 strip。"""
+    return (result.returncode, result.stdout.strip(), result.stderr.strip())
+
+
 def run_capture(
     cmd: list[str],
     cwd: Path | str | None = None,
@@ -38,7 +48,8 @@ def run_capture(
 
     Args:
         cmd: 命令列表 (e.g. ``["git", "status"]``)
-        cwd: 工作目录 (``Path`` / ``str`` / ``None``); ``None`` = 当前进程 cwd
+        cwd: 工作目录 (``Path`` / ``str`` / ``None``); ``None`` = 当前进程 cwd。
+            自 Python 3.6 起 ``subprocess.run`` 原生接受 ``os.PathLike``, 无需 ``str()`` 转换。
         timeout: 传给 ``subprocess.run`` 的超时秒数
         encoding: stdout/stderr 的文本编码 (默认 ``"utf-8"``)
 
@@ -46,8 +57,8 @@ def run_capture(
         ``(returncode, stdout, stderr)`` — 三者都已 ``.strip()``。
 
     失败语义:
-      - ``rc < 0`` → "运行过程本身失败" (timeout / binary 缺失 / OS error),
-        ``stdout=""``, ``stderr=str(exc).strip()``
+      - ``rc < 0`` (具体为 ``RC_RUNTIME_FAIL``) → "运行过程本身失败"
+        (timeout / binary 缺失 / OS error), ``stdout=""``, ``stderr=str(exc).strip()``
       - ``rc >= 0`` → subprocess 正常返回; 业务上的"成功/失败"由调用方按 ``rc==0`` 判断
 
     Examples:
@@ -55,20 +66,18 @@ def run_capture(
         >>> if rc == 0:
         ...     head = out
     """
-    # 边界: cwd=None 必须保持 None 传给 subprocess.run;
-    # 若直接 ``str(None)`` 会得到字符串 ``"None"``, 子进程会试图 chdir 到 ./None 而非保持当前目录。
-    # ``Path`` 走 ``str()`` 转换是因为 subprocess.run 不接受 Path 对象 (仅 str/None)。
-    run_cwd: str | None = str(cwd) if cwd is not None else None
+    # 注: ``cwd`` 直接透传 — subprocess.run 自 3.6 起接受 ``os.PathLike`` (Path 是其子类);
+    # ``None`` 表示保持当前进程 cwd (若 ``str(None)`` 会得到字符串 ``"None"``, 子进程会 chdir 到 ./None)。
     try:
         result = subprocess.run(
             cmd,
-            cwd=run_cwd,
+            cwd=cwd,
             capture_output=True,
             text=True,
             encoding=encoding,
             timeout=timeout,
         )
-        return (result.returncode, result.stdout.strip(), result.stderr.strip())
+        return _to_tuple(result)
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
         # 吞掉统一异常: 调用方通常想要"git 失败了 → n=0 / 走 fallback", 不要裸崩
-        return (-1, "", str(e).strip())
+        return (RC_RUNTIME_FAIL, "", str(e).strip())
