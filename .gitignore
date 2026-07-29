@@ -10,3 +10,6 @@ diary/turns/
 .pytest_cache/
 logs/
 .run/
+
+# 外部参考项目（不入 git）
+references/

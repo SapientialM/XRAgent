@@ -14,6 +14,47 @@ from typing import Any
 from ..config.settings import get_settings
 
 
+# Rate limit：5 分钟内只能调一次 web_fetch（避免 Agent 刷屏）
+WEB_FETCH_MIN_INTERVAL_S = 300
+# 文件位置：跨进程持久化 last_curl_ts
+WEB_FETCH_STATE_FILE = ".run/.web_fetch_state.json"
+
+
+def _read_state() -> dict:
+    """读持久化的 web_fetch 状态（last_curl_ts 等）。"""
+    import json as _json
+    from pathlib import Path
+    p = Path(get_settings().repo_root) / WEB_FETCH_STATE_FILE
+    if not p.exists():
+        return {}
+    try:
+        return _json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_state(state: dict) -> None:
+    import json as _json
+    from pathlib import Path
+    p = Path(get_settings().repo_root) / WEB_FETCH_STATE_FILE
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(_json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _check_rate_limit() -> tuple[bool, float]:
+    """检查 rate limit；返回 (ok, wait_s)。
+
+    ok=True 表示可以调；ok=False 时 wait_s 是还需等多少秒。
+    """
+    state = _read_state()
+    last = float(state.get("last_curl_ts", 0.0))
+    now = time.time()
+    elapsed = now - last
+    if last > 0 and elapsed < WEB_FETCH_MIN_INTERVAL_S:
+        return False, WEB_FETCH_MIN_INTERVAL_S - elapsed
+    return True, 0.0
+
+
 # 敏感词（不区分大小写）：URL 包含这些词就拒绝执行
 SENSITIVE_KEYWORDS = (
     "password",
@@ -74,6 +115,15 @@ def curl_url(url: str, method: str = "GET", data: str = "") -> dict[str, Any]:
     """
     s = get_settings()
 
+    # 0) rate limit
+    ok, wait_s = _check_rate_limit()
+    if not ok:
+        return {
+            "ok": False,
+            "error": f"web_fetch 限流：5 分钟一次，上次调用后还需等 {wait_s:.0f}s",
+            "wait_s": wait_s,
+        }
+
     # 1) 敏感词拦截
     hit = _is_sensitive(url)
     if hit:
@@ -107,6 +157,12 @@ def curl_url(url: str, method: str = "GET", data: str = "") -> dict[str, Any]:
 
     body = body_bytes.decode("utf-8", errors="replace")[:8000] if body_bytes else ""
     _log_request(url, status, body, note=f"method={method}")
+    # 更新 last_curl_ts（5 分钟限流）
+    state = _read_state()
+    state["last_curl_ts"] = time.time()
+    state["last_url"] = url
+    state["last_status"] = status
+    _write_state(state)
     return {"ok": True, "status": status, "body": body, "url": url}
 
 
@@ -116,6 +172,15 @@ def web_search(query: str, top_k: int = 5) -> dict[str, Any]:
     Returns: ok / results: [{title, url, snippet}]
     """
     s = get_settings()
+    # rate limit（web_search 也走同一限流器）
+    ok, wait_s = _check_rate_limit()
+    if not ok:
+        return {
+            "ok": False,
+            "error": f"web_search 限流：5 分钟一次，上次调用后还需等 {wait_s:.0f}s",
+            "wait_s": wait_s,
+        }
+
     hit = _is_sensitive(query)
     if hit:
         _log_request(f"search://{query}", None, f"BLOCKED: sensitive keyword \'{hit}\'", note="SEARCH-BLOCKED")
@@ -144,4 +209,9 @@ def web_search(query: str, top_k: int = 5) -> dict[str, Any]:
             break
 
     _log_request(ddg_url, 200, f"search={query!r} results={len(results)}", note="SEARCH")
+    # 更新 last_curl_ts（5 分钟限流）
+    state = _read_state()
+    state["last_curl_ts"] = time.time()
+    state["last_search_query"] = query
+    _write_state(state)
     return {"ok": True, "query": query, "results": results}
