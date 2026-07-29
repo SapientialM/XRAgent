@@ -5,7 +5,7 @@ import json
 import queue
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .config.settings import get_settings
 
@@ -32,6 +32,11 @@ def register_answer_sink(box: dict) -> None:
 
 
 def enqueue_message(text: str) -> None:
+    """把人类父母消息塞进共享输入队列。
+
+    Raises:
+        RuntimeError: 共享队列还没注册（main.py 没启动）。
+    """
     if _shared_input_queue is not None:
         _shared_input_queue.put(text)
     else:
@@ -39,6 +44,10 @@ def enqueue_message(text: str) -> None:
 
 
 def start_server_background(loop: "ReActLoop") -> None:
+    """后台起 HTTP 服务线程（token 鉴权 + 4 个 endpoint）。
+
+    会替换 loop.gate 的 channel 为 HTTP 实现。
+    """
     s = get_settings()
     _loop_ref.append(loop)
     from .hitl.gate import HitlGate
@@ -49,7 +58,11 @@ def start_server_background(loop: "ReActLoop") -> None:
     t.start()
 
 
-def _http_approval_channel(req):
+def _http_approval_channel(req: Any) -> Any:
+    """HTTP 版的审批 channel：从 reply queue 取一次审批结果。
+
+    超时 120s；任何异常都返回 REJECT 避免 Agent 卡死。
+    """
     from .hitl.gate import ApprovalResult, Decision
     try:
         reply = _http_reply_queue.get(timeout=120)
@@ -59,7 +72,15 @@ def _http_approval_channel(req):
         return ApprovalResult(decision=Decision.REJECT, reason=f"http channel error: {e}")
 
 
-def _make_handler(token: str):
+def _make_handler(token: str) -> type:
+    """构造绑定 token 的 BaseHTTPRequestHandler 子类。
+
+    路由：
+        GET  /last-answer   → 返回最近一次 LLM answer
+        GET  /health        → runtime_state (pid/heartbeat/restart_count)
+        POST /message       → 塞进共享队列
+        POST /approve       → 回复 HITL gate 一次
+    """
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
             pass
@@ -69,7 +90,7 @@ def _make_handler(token: str):
                 return True
             return self.headers.get("Authorization", "") == f"Bearer {token}"
 
-        def _send_json(self, code: int, payload: dict):
+        def _send_json(self, code: int, payload: dict) -> None:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
@@ -77,7 +98,7 @@ def _make_handler(token: str):
             self.end_headers()
             self.wfile.write(data)
 
-        def _read_json(self) -> dict | None:
+        def _read_json(self) -> "dict | None":
             length = int(self.headers.get("Content-Length", "0"))
             if length == 0:
                 return None
@@ -86,7 +107,7 @@ def _make_handler(token: str):
             except Exception:
                 return None
 
-        def do_GET(self):
+        def do_GET(self) -> None:
             if not self._check_token():
                 self._send_json(401, {"error": "unauthorized"})
                 return
@@ -109,7 +130,7 @@ def _make_handler(token: str):
                 return
             self._send_json(404, {"error": "not found"})
 
-        def do_POST(self):
+        def do_POST(self) -> None:
             if not self._check_token():
                 self._send_json(401, {"error": "unauthorized"})
                 return

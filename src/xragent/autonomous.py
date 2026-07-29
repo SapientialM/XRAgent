@@ -10,7 +10,7 @@ import os
 import random
 import time
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 from .config.settings import get_settings
 from .util.json_utils import safe_json_loads
@@ -100,10 +100,11 @@ def task_queue_path() -> Path:
 
 
 def task_cooldown_key(task: dict) -> str:
+    """取任务唯一 key（用 title）用于 cooldown 去重。"""
     return task["title"]
 
 
-DEFAULT_COOLDOWN_S = 7200.0
+DEFAULT_COOLDOWN_S: float = 7200.0
 
 
 def _recent_titles(window_s: float = DEFAULT_COOLDOWN_S) -> set[str]:
@@ -127,10 +128,9 @@ def _recent_titles(window_s: float = DEFAULT_COOLDOWN_S) -> set[str]:
 
 
 
-
 # === autonomous turn-11 patch ===
 # 把任务模板按"风险/收益"排序(优先小改动);冷却从 1h 改 2h。
-def next_task(rng: random.Random | None = None) -> dict:
+def next_task(rng: "random.Random | None" = None) -> dict:
     """从 templates 选一个不在 cooldown 里的任务。
 
     cooldown：同 title 1 小时内不重复。
@@ -145,7 +145,13 @@ def next_task(rng: random.Random | None = None) -> dict:
 
 
 def record_done(task: dict, turn_id: str, summary: str) -> None:
-    """记录一次任务执行结果（append-only）。"""
+    """记录一次任务执行结果（append-only）。
+
+    Args:
+        task: 已完成的任务 dict（来自 TASK_TEMPLATES）。
+        turn_id: 当前 turn 标识（用于 diary 回溯）。
+        summary: 完成情况描述，会被截断到 500 字符。
+    """
     p = task_queue_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     rec = {
@@ -158,8 +164,15 @@ def record_done(task: dict, turn_id: str, summary: str) -> None:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
-def iter_tasks(stop_check) -> Iterator[dict]:
-    """无限迭代任务。stop_check() 返回 True 时退出。"""
+def iter_tasks(stop_check: Callable[[], bool]) -> Iterator[dict]:
+    """无限迭代任务。stop_check() 返回 True 时退出。
+
+    Args:
+        stop_check: 无参 callable，返回 True 时让生成器停。
+
+    Yields:
+        dict: 选中的任务模板。
+    """
     rng = random.Random()
     rng.seed()
     while not stop_check():
