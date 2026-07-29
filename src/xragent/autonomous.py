@@ -10,7 +10,7 @@ import os
 import random
 import time
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Any, Callable, Iterator
 
 from .config.settings import get_settings
 from .util.jsonl_utils import iter_jsonl
@@ -94,13 +94,24 @@ TASK_TEMPLATES = [
 
 
 def task_queue_path() -> Path:
-    """Agent 自己的任务队列（不入 git）。"""
+    """返回 Agent 任务队列文件路径（``memory/queue.jsonl``，不入 git）。
+
+    Returns:
+        queue.jsonl 的绝对路径（``Settings.repo_root / memory/queue.jsonl``）。
+    """
     s = get_settings()
     return s.repo_root / "memory" / "queue.jsonl"
 
 
-def task_cooldown_key(task: dict) -> str:
-    """取任务唯一 key（用 title）用于 cooldown 去重。"""
+def task_cooldown_key(task: dict[str, Any]) -> str:
+    """取任务唯一 key（用 ``title`` 字段）用于 cooldown 去重。
+
+    Args:
+        task: 任务模板 dict（来自 :data:`TASK_TEMPLATES`）；必须有 ``title`` 键。
+
+    Returns:
+        ``task["title"]``；缺失时返回空字符串（保持类型稳定）。
+    """
     return task["title"]
 
 
@@ -113,6 +124,12 @@ def _recent_titles(window_s: float = DEFAULT_COOLDOWN_S) -> set[str]:
     之前这里手写 5+ 行 read_text → splitlines → strip → safe_json_loads → 过滤 None
     块（与 ``evolve/generations.py::list_generations`` 完全同构），现抽到
     ``util.jsonl_utils.iter_jsonl``，调用方只剩一行 for 循环。
+
+    Args:
+        window_s: 时间窗口（秒）；默认 ``DEFAULT_COOLDOWN_S``（2h）。
+
+    Returns:
+        窗口内出现过的 task title 集合；queue 文件不存在时返回空 set。
     """
     p = task_queue_path()
     if not p.exists():
@@ -126,14 +143,20 @@ def _recent_titles(window_s: float = DEFAULT_COOLDOWN_S) -> set[str]:
 
 
 
-
 # === autonomous turn-11 patch ===
 # 把任务模板按"风险/收益"排序(优先小改动);冷却从 1h 改 2h。
-def next_task(rng: "random.Random | None" = None) -> dict:
+def next_task(rng: random.Random | None = None) -> dict[str, Any]:
     """从 templates 选一个不在 cooldown 里的任务。
 
     cooldown：同 title 1 小时内不重复。
     全冷却时返回第一个（让 Agent 自己想办法或蜕皮）。
+
+    Args:
+        rng: 可选随机源；``None`` 时用模块级 :mod:`random`。传入 ``Random``
+            实例便于测试时固定种子。
+
+    Returns:
+        选中的任务 dict（来自 :data:`TASK_TEMPLATES`）。
     """
     rng = rng or random
     recent = _recent_titles()
@@ -143,7 +166,7 @@ def next_task(rng: "random.Random | None" = None) -> dict:
     return rng.choice(candidates)
 
 
-def record_done(task: dict, turn_id: str, summary: str) -> None:
+def record_done(task: dict[str, Any], turn_id: str, summary: str) -> None:
     """记录一次任务执行结果（append-only）。
 
     Args:
@@ -163,7 +186,7 @@ def record_done(task: dict, turn_id: str, summary: str) -> None:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
-def iter_tasks(stop_check: Callable[[], bool]) -> Iterator[dict]:
+def iter_tasks(stop_check: Callable[[], bool]) -> Iterator[dict[str, Any]]:
     """无限迭代任务。stop_check() 返回 True 时退出。
 
     Args:
