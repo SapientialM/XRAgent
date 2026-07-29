@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Iterator
 
 from .config.settings import get_settings
+from .util.json_utils import safe_json_loads
 
 
 # 任务模板：每个都强制 write_file 改 src/，不接受的"只读"task
@@ -86,7 +87,7 @@ TASK_TEMPLATES = [
         "prompt": (
             "检查 git diff origin/main..HEAD：\n"
             "  - 如果含 src/ 改动 → commit → push → py_compile → 写 evolve/generations.jsonl 一行 → 推 push\n"
-            "  - 如果无 src 改动 → 直接 git revert HEAD --no-edit 把上一条 autonomous commit 撤回（避免空转）"
+            "  - 如果无 src/ 改动 → 直接 git revert HEAD --no-edit 把上一条 autonomous commit 撤回（避免空转）"
         ),
     },
 ]
@@ -116,13 +117,13 @@ def _recent_titles(window_s: float = DEFAULT_COOLDOWN_S) -> set[str]:
         line = line.strip()
         if not line:
             continue
-        try:
-            rec = json.loads(line)
-            if rec.get("ts", 0) >= cutoff:
-                seen.add(rec.get("title", ""))
-        except json.JSONDecodeError:
+        rec = safe_json_loads(line)
+        if rec is None:
             continue
+        if rec.get("ts", 0) >= cutoff:
+            seen.add(rec.get("title", ""))
     return seen
+
 
 
 
