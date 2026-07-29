@@ -22,24 +22,32 @@ from .json_utils import safe_json_loads
 
 
 def iter_jsonl(path: Path) -> Iterator[Any]:
-    """逐行读 JSONL；跳过空行和解析失败行（不抛错）。
+    """逐行读 JSONL（懒迭代）；跳过空行和解析失败行（不抛错）。
 
     Args:
         path: JSONL 文件路径。文件不存在时直接结束（yield 0 个），不抛 FileNotFoundError。
 
     Yields:
         解析后的对象（dict / list / 标量均可，类型由调用方负责）。
+
+    Note:
+        使用 ``path.open()`` + ``for line in f`` 懒迭代，而不是
+        ``read_text().splitlines()``；queue.jsonl / generations.jsonl
+        长期 append 后可能很大，整文件载入内存不必要。
     """
     if not path.exists():
         return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        rec = safe_json_loads(line)
-        if rec is None:
-            continue
-        yield rec
+    # 懒迭代：with open() + for line in f，逐行从内核 buffer 读，
+    # 避免 read_text().splitlines() 预建整文件 lines 列表的内存开销。
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = safe_json_loads(line)
+            if rec is None:
+                continue
+            yield rec
 
 
 def read_jsonl(path: Path) -> list[Any]:
