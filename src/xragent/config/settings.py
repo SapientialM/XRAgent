@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     compress_target_ratio: float = 0.7
 
     # === run_cmd 黑名单 binary ===
-    cmd_blacklist: tuple[str, ...] = ("curl", "wget", "ssh", "scp", "nc", "ncat")
+    cmd_blacklist: tuple[str, ...] = ("wget", "ssh", "scp", "nc", "ncat")  # curl 已开放给 web_search 工具（带限流）
 
     # === 工具黑名单路径（仓库内相对路径 resolve 后） ===
     write_blacklist: tuple[str, ...] = (
