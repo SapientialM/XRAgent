@@ -82,15 +82,18 @@ def _make_handler(token: str) -> type:
         POST /approve       → 回复 HITL gate 一次
     """
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, format, *args):
+        def log_message(self, format: str, *args: Any) -> None:
+            """静默 BaseHTTPRequestHandler 默认访问日志（避免污染 stdout）。"""
             pass
 
         def _check_token(self) -> bool:
+            """校验 Authorization 头是否匹配绑定 token；空 token 直接放行。"""
             if not token:
                 return True
             return self.headers.get("Authorization", "") == f"Bearer {token}"
 
         def _send_json(self, code: int, payload: dict) -> None:
+            """把 payload 序列化为 JSON（UTF-8）并以 application/json 响应。"""
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
@@ -99,6 +102,11 @@ def _make_handler(token: str) -> type:
             self.wfile.write(data)
 
         def _read_json(self) -> "dict | None":
+            """按 Content-Length 读取请求体并解析为 dict。
+
+            Returns:
+                解析后的 dict；body 为空或解析失败时返回 None。
+            """
             length = int(self.headers.get("Content-Length", "0"))
             if length == 0:
                 return None
@@ -108,6 +116,7 @@ def _make_handler(token: str) -> type:
                 return None
 
         def do_GET(self) -> None:
+            """处理 GET /last-answer 与 GET /health；其他路径返回 404。"""
             if not self._check_token():
                 self._send_json(401, {"error": "unauthorized"})
                 return
@@ -131,6 +140,7 @@ def _make_handler(token: str) -> type:
             self._send_json(404, {"error": "not found"})
 
         def do_POST(self) -> None:
+            """处理 POST /message（入队）与 POST /approve（回复 HITL gate）；其他路径返回 404。"""
             if not self._check_token():
                 self._send_json(401, {"error": "unauthorized"})
                 return
