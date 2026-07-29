@@ -102,6 +102,9 @@ def task_cooldown_key(task: dict) -> str:
     return task["title"]
 
 
+DEFAULT_COOLDOWN_S = 7200.0
+
+
 def _recent_titles(window_s: float = DEFAULT_COOLDOWN_S) -> set[str]:
     """返回最近 window_s 秒内做过的任务 title 集合（用于 cooldown）。"""
     p = task_queue_path()
@@ -126,7 +129,6 @@ def _recent_titles(window_s: float = DEFAULT_COOLDOWN_S) -> set[str]:
 
 # === autonomous turn-11 patch ===
 # 把任务模板按"风险/收益"排序(优先小改动);冷却从 1h 改 2h。
-DEFAULT_COOLDOWN_S = 7200.0
 def next_task(rng: random.Random | None = None) -> dict:
     """从 templates 选一个不在 cooldown 里的任务。
 
