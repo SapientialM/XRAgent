@@ -29,16 +29,16 @@ from pathlib import Path
 
 def run_capture(
     cmd: list[str],
-    cwd: "Path | str | None" = None,
+    cwd: Path | str | None = None,
     *,
-    timeout: "int | float | None" = None,
+    timeout: int | float | None = None,
     encoding: str = "utf-8",
 ) -> tuple[int, str, str]:
     """Run ``cmd`` 抓 stdout+stderr, 返回 ``(returncode, stdout, stderr)`` 三元组。
 
     Args:
         cmd: 命令列表 (e.g. ``["git", "status"]``)
-        cwd: 工作目录; ``None`` = 当前进程 cwd
+        cwd: 工作目录 (``Path`` / ``str`` / ``None``); ``None`` = 当前进程 cwd
         timeout: 传给 ``subprocess.run`` 的超时秒数
         encoding: stdout/stderr 的文本编码 (默认 ``"utf-8"``)
 
@@ -55,10 +55,14 @@ def run_capture(
         >>> if rc == 0:
         ...     head = out
     """
+    # 边界: cwd=None 必须保持 None 传给 subprocess.run;
+    # 若直接 ``str(None)`` 会得到字符串 ``"None"``, 子进程会试图 chdir 到 ./None 而非保持当前目录。
+    # ``Path`` 走 ``str()`` 转换是因为 subprocess.run 不接受 Path 对象 (仅 str/None)。
+    run_cwd: str | None = str(cwd) if cwd is not None else None
     try:
         result = subprocess.run(
             cmd,
-            cwd=str(cwd) if cwd is not None else None,
+            cwd=run_cwd,
             capture_output=True,
             text=True,
             encoding=encoding,
