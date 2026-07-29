@@ -96,6 +96,21 @@ def build_default_registry() -> ToolRegistry:
     add("memory_save", "向长期记忆写入一条事实（SQLite）。",
         {"type": "object", "properties": {"category": {"type": "string"}, "content": {"type": "string"}}, "required": ["category", "content"]},
         "low", memory_tools.memory_save)
+    add("memory_recall_range", "按时间窗口从长期记忆召回 fact (newest first)。start_ts/end_ts 为 None 时表示开放端。",
+        {"type": "object", "properties": {
+            "start_ts": {"type": "number"},
+            "end_ts": {"type": "number"},
+            "category": {"type": "string"},
+            "k": {"type": "integer", "default": 1000},
+        }},
+        "low", memory_tools.memory_recall_range)
+    add("memory_top_frequent", "按 content 频次降序返回 top-N；min_count 过滤一次性噪音。",
+        {"type": "object", "properties": {
+            "n": {"type": "integer", "default": 10},
+            "category": {"type": "string"},
+            "min_count": {"type": "integer", "default": 2},
+        }},
+        "low", memory_tools.memory_top_frequent)
     add("diary_write", "向 diary/YYYY-MM-DD.md 追加一段（人类可读）。",
         {"type": "object", "properties": {"title": {"type": "string"}, "body": {"type": "string"}}, "required": ["title", "body"]},
         "low", diary_tools.diary_write)
