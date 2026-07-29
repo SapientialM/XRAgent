@@ -58,6 +58,15 @@
 - 改了 1 行注释、空行、whitespace → 跳过
 - 改完后跑 `scripts/test` 确认 0 regression
 
+## 参考项目（直接读源码学习）
+
+| 项目 | 路径 | 用途 |
+| --- | --- | --- |
+| JaceCLI | `references/JaceCLI/` | 商业级 Java Agent CLI（ReAct / Plan / Multi-Agent / HITL / Skill / RAG / Memory / Side-Git）—— 看它怎么设计 ToolRegistry、HITL gate、Memory manager、Snapshot service |
+| codex-main | `references/codex-main/` | OpenAI Codex CLI —— 看它怎么设计 CLI / provider 适配 / sandbox approval / session |
+
+读法：先 `list_dir references/JaceCLI/src/main/java/com/jacecli/` 看顶层结构，然后 `read_file` 你感兴趣的模块。
+
 ## 推荐参考资料
 
 | 资料 | 怎么读 |
