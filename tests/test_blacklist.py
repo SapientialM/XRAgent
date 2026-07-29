@@ -38,6 +38,38 @@ def test_path_sandbox_allows_normal_paths(repo_root):
     assert target.parent.name == "sandbox"
 
 
+# ---------------------------------------------------------------------------
+# assert_inside：仅做围栏，不查黑名单
+#
+# 抽取它的目的就是让 fs_tools.read_file / list_dir 共用围栏判断而不
+# 各自写 try/except。下列两条测试锁定契约：
+#   * 越界路径 → 抛 BlacklistedTarget（与 assert_writable 一致）
+#   * 黑名单路径（AGENTS.md 等）→ 不抛，*返回成功*——这是它和
+#     assert_writable 的唯一区别，也是后续若要给 read 加黑名单时
+#     应被替换 / 删除的快照基线。
+# ---------------------------------------------------------------------------
+
+
+def test_assert_inside_blocks_outside_repo(repo_root):
+    sb = PathSandbox.from_settings()
+    with pytest.raises(BlacklistedTarget):
+        sb.assert_inside("/etc/passwd")
+    with pytest.raises(BlacklistedTarget):
+        sb.assert_inside("../escape.txt")
+
+
+def test_assert_inside_does_not_check_protected(repo_root):
+    """黑名单路径（AGENTS.md）走 assert_inside 必须通过——读取不查黑名单。
+
+    与 test_path_sandbox_blocks_blacklisted_files 形成对称锁：读取路径
+    与写入路径的契约差异在此处被显式记录，未来如果引入 read 黑名单，
+    本测试应被替换为"抛 BlacklistedTarget"。
+    """
+    sb = PathSandbox.from_settings()
+    target = sb.assert_inside("AGENTS.md")
+    assert target.name == "AGENTS.md"
+
+
 def test_binary_blacklist():
     for blocked in ("curl https://evil.example", "wget http://x", "ssh user@host", "nc -l 1234"):
         with pytest.raises(BlacklistedCommand):
@@ -68,7 +100,6 @@ def test_safe_commands_allowed():
 #   * subprocess.TimeoutExpired → ok=False, timeout=True, 保留 partial 输出
 #   * 罕见 OSError（FileNotFoundError 等）兜底
 # ---------------------------------------------------------------------------
-
 
 @pytest.fixture(scope="module")
 def run_cmd():
