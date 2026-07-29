@@ -3,16 +3,33 @@ from __future__ import annotations
 
 import time
 
-from xragent.memory.manager import MemoryManager
+from xragent.memory.manager import Fact, MemoryManager
 
 
 def test_save_and_recall(repo_root):
+    """5.1: save_fact 现在返回 Fact 而非 int, 验证字段全部填充。"""
     m = MemoryManager()
-    fid = m.save_fact("preference", "user 喜欢 Python", source_turn="t1")
-    assert fid > 0
+    f = m.save_fact("preference", "user 喜欢 Python", source_turn="t1")
+    assert isinstance(f, Fact)
+    assert f.id > 0
+    assert f.category == "preference"
+    assert f.content == "user 喜欢 Python"
+    assert f.source_turn == "t1"
+    # 没传 source_turn_idx 时为 None (向后兼容老调用)
+    assert f.source_turn_idx is None
     results = m.recall("Python")
-    assert any(f.id == fid for f in results)
-    assert any(f.content == "user 喜欢 Python" for f in results)
+    assert any(x.id == f.id for x in results)
+    assert any(x.content == "user 喜欢 Python" for x in results)
+
+
+def test_save_fact_preserves_source_turn_idx(repo_root):
+    """5.1: 新字段 source_turn_idx 持久化 + recall 出来能读到。"""
+    m = MemoryManager()
+    f = m.save_fact("note", "round 7 笔记", source_turn="t7", source_turn_idx=7)
+    assert f.source_turn_idx == 7
+    # 落库后再 recall, 新字段也应在
+    hits = m.recall("round 7")
+    assert hits and hits[0].source_turn_idx == 7
 
 
 def test_recall_with_category_filter(repo_root):
@@ -96,3 +113,45 @@ def test_recent_and_count(repo_root):
     last = m.recent(n=2)
     assert len(last) == 2
     assert all(isinstance(f.content, str) for f in last)
+
+
+def test_recall_by_turn_idx(repo_root):
+    """5.1 新方法: 按 turn 整数索引召回, 走 idx_facts_source_turn_idx。"""
+    m = MemoryManager()
+    m.save_fact("note", "t0 fact A", source_turn="t0", source_turn_idx=0)
+    m.save_fact("note", "t0 fact B", source_turn="t0", source_turn_idx=0)
+    m.save_fact("note", "t2 fact", source_turn="t2", source_turn_idx=2)
+    # 没填 idx 的不参与按 idx 召回
+    m.save_fact("note", "无 idx 的 fact", source_turn="t?")
+
+    turn0 = m.recall_by_turn_idx(0)
+    contents0 = {x.content for x in turn0}
+    assert contents0 == {"t0 fact A", "t0 fact B"}
+    assert all(x.source_turn_idx == 0 for x in turn0)
+
+    turn2 = m.recall_by_turn_idx(2)
+    assert len(turn2) == 1
+    assert turn2[0].content == "t2 fact"
+    assert turn2[0].source_turn_idx == 2
+
+    # 不存在的 turn_idx 返回空 (不是 None)
+    empty = m.recall_by_turn_idx(999)
+    assert empty == []
+
+
+def test_schema_v51_migration_idempotent(repo_root):
+    """5.1 migration: 反复 init 不应破坏, 也不应重复加列。"""
+    m1 = MemoryManager()
+    cols1 = [r[1] for r in m1._conn.execute("PRAGMA table_info(facts)").fetchall()]
+    assert "source_turn_idx" in cols1
+
+    # 模拟老 DB (没 source_turn_idx) 升级路径: 手工删列不现实,
+    # 但我们可以直接验证 _migrate_v51 在已有列上 no-op
+    m1._migrate_v51()  # 第二次调用不应抛
+    cols2 = [r[1] for r in m1._conn.execute("PRAGMA table_info(facts)").fetchall()]
+    assert cols2.count("source_turn_idx") == 1  # 没有被加第二遍
+
+    # 索引存在性
+    idx = [r[1] for r in m1._conn.execute("PRAGMA index_list(facts)").fetchall()]
+    assert "idx_facts_source_turn_idx" in idx
+    m1.close()

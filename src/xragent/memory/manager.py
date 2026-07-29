@@ -16,9 +16,45 @@ class Fact:
     category: str
     content: str
     source_turn: str
+    # 5.1: 新增字段，对应 DB 列 source_turn_idx (INTEGER, nullable)。
+    # 与 source_turn (TEXT, turn id 字符串) 并存: 字符串给人看, 整数给索引。
+    # 新字段放在末尾 + 默认 None, 老代码 positional 构造 5 个字段不会破坏。
+    source_turn_idx: int | None = None
 
 
 class MemoryManager:
+    # === Schema 版本: 5.0 → 5.1 ===
+    # 变更:
+    #   1. facts 表新增列  source_turn_idx INTEGER  (nullable)
+    #   2. 新增索引       idx_facts_source_turn_idx ON facts(source_turn_idx)
+    # 用途:
+    #   - 让"按 turn 索引召回 fact"成为一等公民 (recall_by_turn_idx)
+    #   - 配合审计/回滚场景 ("这一轮 AI 存了哪些 fact?")
+    # 向后兼容:
+    #   - 新字段 nullable; 老行 source_turn_idx=NULL, recall_by_turn_idx 会跳过
+    #   - 新 DB 走 BASE_SCHEMA 直接含新列; 老 DB 走 _migrate_v51 幂等 ALTER
+    #   - 旧 API 调用方不受影响: source_turn (TEXT) 仍然保留
+    BASE_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS facts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts REAL NOT NULL,
+      category TEXT NOT NULL,
+      content TEXT NOT NULL,
+      source_turn TEXT,
+      source_turn_idx INTEGER
+    );
+    """
+
+    INDEX_SCHEMA = """
+    CREATE INDEX IF NOT EXISTS idx_facts_category_ts ON facts(category, ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_facts_ts ON facts(ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_facts_source_turn ON facts(source_turn);
+    CREATE INDEX IF NOT EXISTS idx_facts_source_turn_idx ON facts(source_turn_idx);
+    """
+
+    # 兼容旧引用 (任何外部代码读 SCHEMA 仍可拿到完整脚本)
+    SCHEMA = BASE_SCHEMA + INDEX_SCHEMA
+
     # Schema notes:
     # 1. (category, ts DESC) composite index covers recall()'s two main patterns:
     #      WHERE category = ? ORDER BY ts DESC LIMIT ?
@@ -30,20 +66,9 @@ class MemoryManager:
     #    The current API never queries by source_turn, but the column is
     #    populated on every save_fact() and the index is cheap; it removes
     #    a full scan if that pattern emerges.
-    # 4. Old single-column idx_facts_category is a prefix of the composite and is
+    # 4. (source_turn_idx) index: 新增, 与 #3 对偶, 走整数 turn 索引。
+    # 5. Old single-column idx_facts_category is a prefix of the composite and is
     #    therefore redundant; existing DBs may still carry it (harmless).
-    SCHEMA = """
-    CREATE TABLE IF NOT EXISTS facts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      ts REAL NOT NULL,
-      category TEXT NOT NULL,
-      content TEXT NOT NULL,
-      source_turn TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_facts_category_ts ON facts(category, ts DESC);
-    CREATE INDEX IF NOT EXISTS idx_facts_ts ON facts(ts DESC);
-    CREATE INDEX IF NOT EXISTS idx_facts_source_turn ON facts(source_turn);
-    """
 
     def __init__(self, db_path: Path | None = None):
         s = get_settings()
@@ -57,19 +82,56 @@ class MemoryManager:
         #   - synchronous=NORMAL   WAL 模式下仍耐崩溃, 但省掉每次 commit 的 fsync
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.executescript(self.SCHEMA)
+        # 顺序: BASE_SCHEMA (新 DB 拿全列) -> 幂等 migration (老 DB 补列) -> 索引
+        self._conn.executescript(self.BASE_SCHEMA)
+        self._migrate_v51()
+        self._conn.executescript(self.INDEX_SCHEMA)
         self._conn.commit()
 
-    def save_fact(self, category: str, content: str, source_turn: str = "") -> int:
+    def _migrate_v51(self) -> None:
+        """5.0 → 5.1: 为已存在的 facts 表补 source_turn_idx 列。
+
+        SQLite 没有 ADD COLUMN IF NOT EXISTS, 必须先 PRAGMA table_info 探列。
+        新 DB (走 BASE_SCHEMA) 已经有列, 这里会跳过; 老 DB (走 5.0 schema) 才
+        真正执行 ALTER。幂等。
+        """
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(facts)").fetchall()]
+        if "source_turn_idx" not in cols:
+            self._conn.execute("ALTER TABLE facts ADD COLUMN source_turn_idx INTEGER")
+            self._conn.commit()
+
+    def save_fact(
+        self,
+        category: str,
+        content: str,
+        source_turn: str = "",
+        source_turn_idx: int | None = None,
+    ) -> Fact:
+        """插入一条 fact, 返回刚插入的 Fact 对象 (含 db 自增 id 与 ts)。
+
+        返回类型 5.0→5.1 由 int 改为 Fact:
+          - 老调用方关心 id: 改用 .id
+          - 顺便拿到 ts / category / content, 不必再 recall 一次
+        """
+        ts = time.time()
         cur = self._conn.execute(
-            "INSERT INTO facts (ts, category, content, source_turn) VALUES (?, ?, ?, ?)",
-            (time.time(), category, content, source_turn),
+            "INSERT INTO facts (ts, category, content, source_turn, source_turn_idx) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (ts, category, content, source_turn, source_turn_idx),
         )
         self._conn.commit()
-        return cur.lastrowid or 0
+        new_id = cur.lastrowid or 0
+        return Fact(
+            id=new_id,
+            ts=ts,
+            category=category,
+            content=content,
+            source_turn=source_turn,
+            source_turn_idx=source_turn_idx,
+        )
 
     def recall(self, query: str, k: int = 5, category: str | None = None) -> list[Fact]:
-        sql = "SELECT id, ts, category, content, source_turn FROM facts"
+        sql = "SELECT id, ts, category, content, source_turn, source_turn_idx FROM facts"
         clauses = []
         params = []
         if query:
@@ -83,7 +145,17 @@ class MemoryManager:
         sql += " ORDER BY ts DESC LIMIT ?"
         params.append(k)
         rows = self._conn.execute(sql, params).fetchall()
-        return [Fact(id=r[0], ts=r[1], category=r[2], content=r[3], source_turn=r[4]) for r in rows]
+        return [
+            Fact(
+                id=r[0],
+                ts=r[1],
+                category=r[2],
+                content=r[3],
+                source_turn=r[4],
+                source_turn_idx=r[5],
+            )
+            for r in rows
+        ]
 
     def recall_range(
         self,
@@ -102,7 +174,7 @@ class MemoryManager:
           - ts + category  -> idx_facts_category_ts
         ORDER BY ts DESC 让 LIMIT 提前结束。
         """
-        sql = "SELECT id, ts, category, content, source_turn FROM facts"
+        sql = "SELECT id, ts, category, content, source_turn, source_turn_idx FROM facts"
         clauses: list[str] = []
         params: list = []
         if start_ts is not None:
@@ -119,7 +191,17 @@ class MemoryManager:
         sql += " ORDER BY ts DESC LIMIT ?"
         params.append(k)
         rows = self._conn.execute(sql, params).fetchall()
-        return [Fact(id=r[0], ts=r[1], category=r[2], content=r[3], source_turn=r[4]) for r in rows]
+        return [
+            Fact(
+                id=r[0],
+                ts=r[1],
+                category=r[2],
+                content=r[3],
+                source_turn=r[4],
+                source_turn_idx=r[5],
+            )
+            for r in rows
+        ]
 
     def top_frequent(
         self,
@@ -144,11 +226,50 @@ class MemoryManager:
         rows = self._conn.execute(sql, params).fetchall()
         return [(r[0], r[1]) for r in rows]
 
+    def recall_by_turn_idx(self, turn_idx: int, k: int = 100) -> list[Fact]:
+        """按 turn 整数索引召回 fact。5.1 新方法。
+
+        与 source_turn (TEXT, 字符串 id) 的区别: 这里是 INTEGER, 配合
+        idx_facts_source_turn_idx 做 O(log n) 查找, 适合"第 N 轮 AI 存了什么"
+        这类审计/回滚场景。
+
+        NULL 的 source_turn_idx 会被过滤 (老行 / 没填的写入)。
+        """
+        rows = self._conn.execute(
+            "SELECT id, ts, category, content, source_turn, source_turn_idx "
+            "FROM facts WHERE source_turn_idx = ? "
+            "ORDER BY ts DESC LIMIT ?",
+            (turn_idx, k),
+        ).fetchall()
+        return [
+            Fact(
+                id=r[0],
+                ts=r[1],
+                category=r[2],
+                content=r[3],
+                source_turn=r[4],
+                source_turn_idx=r[5],
+            )
+            for r in rows
+        ]
+
     def recent(self, n: int = 20) -> list[Fact]:
         rows = self._conn.execute(
-            "SELECT id, ts, category, content, source_turn FROM facts ORDER BY ts DESC LIMIT ?", (n,)
+            "SELECT id, ts, category, content, source_turn, source_turn_idx "
+            "FROM facts ORDER BY ts DESC LIMIT ?",
+            (n,),
         ).fetchall()
-        return [Fact(id=r[0], ts=r[1], category=r[2], content=r[3], source_turn=r[4]) for r in rows]
+        return [
+            Fact(
+                id=r[0],
+                ts=r[1],
+                category=r[2],
+                content=r[3],
+                source_turn=r[4],
+                source_turn_idx=r[5],
+            )
+            for r in rows
+        ]
 
     def count(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
