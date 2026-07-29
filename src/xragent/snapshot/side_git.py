@@ -101,9 +101,28 @@ class SideGit:
     def current_head(self) -> str:
         return self._run("rev-parse", "HEAD")
 
-    def add_all_and_commit(self, message: str) -> str | None:
+    def add_all_and_commit(self, message: str, min_diff_bytes: int = 100) -> str | None:
+        """commit 当且仅当有实质性改动（>= min_diff_bytes 字节）。
+
+        防止 Agent 写一行注释就 commit 刷屏。
+        """
         if not self._has_changes():
             return None
+        # 统计本次 diff 的字节/行数；太小就跳过
+        try:
+            stat_out = self._run("diff", "--shortstat", "HEAD")
+            # 形如 "1 file changed, 2 insertions(+), 1 deletion(-)"
+            ins = dels = 0
+            for part in stat_out.split(","):
+                if "insertion" in part:
+                    ins = int(part.strip().split()[0])
+                elif "deletion" in part:
+                    dels = int(part.strip().split()[0])
+            if (ins + dels) < min_diff_bytes:
+                # 改动太小；不 commit
+                return None
+        except RuntimeError:
+            pass
         self._run("add", "-A")
         self._run("commit", "-m", message)
         return self._run("rev-parse", "HEAD")

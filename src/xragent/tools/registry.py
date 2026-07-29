@@ -101,6 +101,12 @@ def build_default_registry() -> ToolRegistry:
     add("propose_self_replace", "金蝉脱壳：commit → push → 编译 → supervisor 切换。需要 HITL 审批。",
         {"type": "object", "properties": {"reason": {"type": "string"}, "entry": {"type": "string", "default": "src/xragent/main.py"}}, "required": ["reason"]},
         "high", evolve_tools.propose_self_replace)
+    add("curl_url", "抓取 URL 内容（GET/POST），自动写 diary/search-log.md。敏感词拦截。",
+        {"type": "object", "properties": {"url": {"type": "string"}, "method": {"type": "string", "default": "GET"}, "data": {"type": "string", "default": ""}}, "required": ["url"]},
+        "medium", web_search.curl_url)
+    add("web_search", "用 DuckDuckGo 搜索 query（无需 API key），返回 top 5 URL。",
+        {"type": "object", "properties": {"query": {"type": "string"}, "top_k": {"type": "integer", "default": 5}}, "required": ["query"]},
+        "medium", web_search.web_search)
     add("terminate", "优雅终止当前 Agent 进程；supervisor 不会再自动拉起。需要 HITL 审批。",
         {"type": "object", "properties": {"reason": {"type": "string"}}, "required": ["reason"]},
         "high", evolve_tools.terminate)
