@@ -40,5 +40,11 @@ class TraceRecorder:
         return path
 
 
-def new_turn_id() -> str:
-    return time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}"
+def new_turn_id(now: float | None = None) -> str:
+    """生成 turn id: YYYYMMDD-HHMMSS-mmm。
+
+    Args:
+        now: 可选 epoch 秒,用于测试时注入固定时间。
+    """
+    t = now if now is not None else time.time()
+    return time.strftime("%Y%m%d-%H%M%S", time.localtime(t)) + f"-{int(t * 1000) % 1000:03d}"
