@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..core.backend import ToolSpec
+from . import web_search  # curl_url + web_search tools
 
 
 @dataclass

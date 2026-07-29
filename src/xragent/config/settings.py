@@ -78,7 +78,6 @@ class Settings(BaseSettings):
 
     # === 工具黑名单路径（仓库内相对路径 resolve 后） ===
     write_blacklist: tuple[str, ...] = (
-        "AGENTS.md",  # 梦想：Agent 不可改
         ".env",
         ".git",
         "runtime_state.json",
