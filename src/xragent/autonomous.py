@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 from .config.settings import get_settings
-from .util.json_utils import safe_json_loads
+from .util.jsonl_utils import iter_jsonl
 
 
 # 任务模板：每个都强制 write_file 改 src/，不接受的"只读"task
@@ -108,19 +108,18 @@ DEFAULT_COOLDOWN_S: float = 7200.0
 
 
 def _recent_titles(window_s: float = DEFAULT_COOLDOWN_S) -> set[str]:
-    """返回最近 window_s 秒内做过的任务 title 集合（用于 cooldown）。"""
+    """返回最近 window_s 秒内做过的任务 title 集合（用于 cooldown）。
+
+    之前这里手写 5+ 行 read_text → splitlines → strip → safe_json_loads → 过滤 None
+    块（与 ``evolve/generations.py::list_generations`` 完全同构），现抽到
+    ``util.jsonl_utils.iter_jsonl``，调用方只剩一行 for 循环。
+    """
     p = task_queue_path()
     if not p.exists():
         return set()
     cutoff = time.time() - window_s
     seen: set[str] = set()
-    for line in p.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        rec = safe_json_loads(line)
-        if rec is None:
-            continue
+    for rec in iter_jsonl(p):
         if rec.get("ts", 0) >= cutoff:
             seen.add(rec.get("title", ""))
     return seen
