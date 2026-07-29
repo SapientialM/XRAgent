@@ -5,7 +5,6 @@
 """
 from __future__ import annotations
 
-import json
 import os
 import random
 import time
@@ -13,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .config.settings import get_settings
-from .util.jsonl_utils import iter_jsonl
+from .util.jsonl_utils import append_jsonl, iter_jsonl
 
 
 # 任务模板：每个都强制 write_file 改 src/，不接受的"只读"task
@@ -173,17 +172,20 @@ def record_done(task: dict[str, Any], turn_id: str, summary: str) -> None:
         task: 已完成的任务 dict（来自 TASK_TEMPLATES）。
         turn_id: 当前 turn 标识（用于 diary 回溯）。
         summary: 完成情况描述，会被截断到 500 字符。
+
+    Note:
+        历史 here 手写 ``p.parent.mkdir + open(a) + json.dumps + write`` 共 5 行，
+        与 ``util.jsonl_utils.append_jsonl``（同模式）重复。改成调用 helper 后
+        行为不变（同样 ensure_ascii=False + 末尾 \\n + mkdir parent），但去掉了
+        一处可能漂移的复制粘贴。
     """
-    p = task_queue_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
     rec = {
         "ts": time.time(),
         "title": task["title"],
         "turn_id": turn_id,
         "summary": summary[:500],
     }
-    with p.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    append_jsonl(task_queue_path(), rec)
 
 
 def iter_tasks(stop_check: Callable[[], bool]) -> Iterator[dict[str, Any]]:
