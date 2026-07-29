@@ -85,6 +85,65 @@ class MemoryManager:
         rows = self._conn.execute(sql, params).fetchall()
         return [Fact(id=r[0], ts=r[1], category=r[2], content=r[3], source_turn=r[4]) for r in rows]
 
+    def recall_range(
+        self,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+        category: str | None = None,
+        k: int = 1000,
+    ) -> list[Fact]:
+        """按 ts 区间召回 fact。start_ts/end_ts 为 None 时分别表示 -∞ / +∞。
+
+        与 recall() 的区别: recall() 走 LIKE 关键词路径, 本方法走时间窗口路径;
+        两者互补, 一个回答"说过什么", 一个回答"什么时候说的"。
+
+        索引命中:
+          - 仅 ts 范围    -> idx_facts_ts
+          - ts + category  -> idx_facts_category_ts
+        ORDER BY ts DESC 让 LIMIT 提前结束。
+        """
+        sql = "SELECT id, ts, category, content, source_turn FROM facts"
+        clauses: list[str] = []
+        params: list = []
+        if start_ts is not None:
+            clauses.append("ts >= ?")
+            params.append(start_ts)
+        if end_ts is not None:
+            clauses.append("ts <= ?")
+            params.append(end_ts)
+        if category:
+            clauses.append("category = ?")
+            params.append(category)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY ts DESC LIMIT ?"
+        params.append(k)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [Fact(id=r[0], ts=r[1], category=r[2], content=r[3], source_turn=r[4]) for r in rows]
+
+    def top_frequent(
+        self,
+        n: int = 10,
+        category: str | None = None,
+        min_count: int = 2,
+    ) -> list[tuple[str, int]]:
+        """按 content 出现次数降序，返回 top-N (content, count) 列表。
+
+        用于回答"用户反复说过的点是什么" —— 单次出现的事实在 min_count=2 默认下
+        会被过滤, 避免 top-N 永远被一次性噪音占满。需召回全部时显式传 min_count=1。
+
+        同 content 在不同 category 下分别计数（GROUP BY 不跨类）。
+        """
+        sql = "SELECT content, COUNT(*) AS c FROM facts"
+        params: list = []
+        if category:
+            sql += " WHERE category = ?"
+            params.append(category)
+        sql += " GROUP BY content HAVING c >= ? ORDER BY c DESC, MAX(ts) DESC LIMIT ?"
+        params.extend([min_count, n])
+        rows = self._conn.execute(sql, params).fetchall()
+        return [(r[0], r[1]) for r in rows]
+
     def recent(self, n: int = 20) -> list[Fact]:
         rows = self._conn.execute(
             "SELECT id, ts, category, content, source_turn FROM facts ORDER BY ts DESC LIMIT ?", (n,)
