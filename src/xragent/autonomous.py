@@ -15,64 +15,78 @@ from typing import Iterator
 from .config.settings import get_settings
 
 
-# 任务模板：覆盖测试 / 文档 / 重构 / prompt / 自我观察
+# 任务模板：每个都强制 write_file 改 src/，不接受的"只读"task
 TASK_TEMPLATES = [
     {
-        "title": "审视代码",
+        "title": "改一处 src 性能可读性",
         "prompt": (
-            "读 src/xragent/ 下任一模块的源代码，找出一个能改进的点"
-            "（性能 / 可读性 / 边界条件处理 / 测试覆盖）。改完后跑 `scripts/test` 验证。"
-            "如果跑测试失败，回滚改动并换下一个改进点。"
+            "读 src/xragent/ 下任一模块，必须用 write_file 改至少 3 行（不能只读）。\n"
+            "目标：性能 / 可读性 / 边界条件 / 抽公共函数 / 简化 if-else。\n"
+            "改完跑 scripts/test；如失败 git checkout -- <file> 回滚再换下一个。\n"
+            "commit message 里写清楚：改了什么、为什么、改了几行。"
         ),
     },
     {
-        "title": "补充测试",
+        "title": "改一处工具实现",
         "prompt": (
-            "为 src/xragent/ 下某个工具/模块增加单元测试覆盖之前没测过的边界条件。"
-            "新测试加到 tests/test_*.py 末尾，跑 `scripts/test` 确认全部通过。"
+            "读 src/xragent/tools/ 下某个工具（fs_tools/exec_tools/git_tools/memory_tools/diary_tools/evolve_tools）。\n"
+            "必须用 write_file 改：加新参数 / 改错误处理 / 加 timeout / 抽公共 helper / 加 type hint。\n"
+            "改完跑 scripts/test；新增测试加到 tests/test_*.py 覆盖改动。\n"
+            "commit message 写：why + diff stat。"
         ),
     },
     {
-        "title": "更新文档",
+        "title": "改 schema 或加 API",
         "prompt": (
-            "阅读 README.md + docs/architecture-v0.md + AGENTS.md，找一个没说清楚或过时的地方，"
-            "补一段说明。保持简洁——三句话能说清就别写十句。"
+            "读 src/xragent/memory/manager.py 或 src/xragent/snapshot/side_git.py，\n"
+            "必须 write_file 改：加 SQLite 索引 / 加新方法 / 改 dataclass 字段 / 改返回类型。\n"
+            "改完跑 PYTHONPATH=src python3.11 -m pytest tests/test_memory.py tests/test_sidegit.py -v。\n"
+            "schema 改动要写 migration 注释（5.0 → 5.1: 加 source_turn_idx）。"
         ),
     },
     {
-        "title": "反思日记",
+        "title": "重构抽公共函数",
         "prompt": (
-            "读 diary/2026-07-28.md + runtime_state.json 状态，写一段"
-            "对自己当前能力的客观评估（哪里做得好、哪里有缺陷），存入 memory/long_term/facts.db。"
-            "category 字段填 'self_reflection'。"
+            "找 src/xragent/ 下两个 .py 文件里重复出现的 5+ 行代码（try/except、JSON 解析、\n"
+            "git 命令、format timestamp 之类），抽到 src/xragent/util/ 或合适位置。\n"
+            "必须 write_file 改两个原文件 + 1 个新 util 文件。\n"
+            "改完跑 scripts/test 确认 0 regression。"
         ),
     },
     {
-        "title": "优化提示词",
+        "title": "加 type hint 与 docstring",
         "prompt": (
-            "审视 src/xragent/core/dream.py 的 system_prompt_prefix 与 safety_reminder，"
-            "看是否有冗余、歧义或可改进的措辞。改完后跑 smoke 测试 (`scripts/smoke`) 验证。"
+            "读 src/xragent/ 下 1-2 个 .py，找函数没 type hint 或 docstring 缺失的，\n"
+            "必须 write_file 加上 type hint（PEP 604: int | None）+ Google-style docstring。\n"
+            "改完跑 scripts/test。commit message 写：typing: <files> 共加 N 个 hint。"
         ),
     },
     {
-        "title": "改进 memory",
+        "title": "加新功能小而具体",
         "prompt": (
-            "读 src/xragent/memory/manager.py，看 SQLite schema 是否有可优化的索引"
-            "或缺失字段。改完后跑单测 `PYTHONPATH=src python3.11 -m pytest tests/test_memory.py -v`。"
+            "挑一个没做但应该做的小功能，写到 src/xragent/。\n"
+            "候选：\n"
+            "  - memory 工具：按 ts 范围 recall / top-N 频繁 fact\n"
+            "  - snapshot：清理 30 天前的 snapshot tag\n"
+            "  - blacklist：支持更复杂的 binary 黑名单 pattern（regex）\n"
+            "  - diary：自动按周归档 diary/*.md\n"
+            "必须 write_file + 加 1 个测试。改完跑 scripts/test。"
         ),
     },
     {
-        "title": "改善工具",
+        "title": "写 ADR 设计决策",
         "prompt": (
-            "读 src/xragent/tools/ 下某个工具的实现，看是否有更 Pythonic 的写法或更好的错误处理。"
-            "改完后跑 `scripts/test`。如果改动导致某个工具行为变了，明确写出来。"
+            "读 docs/architecture-v0.md 和 src/xragent/ 实际代码，看哪里描述过时或缺失。\n"
+            "必须 write_file 改 docs/architecture-v0.md 或加 docs/adr/0001-*.md（设计决策记录）。\n"
+            "改完 commit。"
         ),
     },
     {
-        "title": "金蝉脱壳演练",
+        "title": "金蝉脱壳演练仅当有 src 改动时",
         "prompt": (
-            "运行一次完整金蝉脱壳演练：commit 当前所有改动 → push → py_compile 验证 → 写世代谱。"
-            "如发现编译失败，立刻 `git revert HEAD` 回滚并把错误写进 diary。"
+            "检查 git diff origin/main..HEAD：\n"
+            "  - 如果含 src/ 改动 → commit → push → py_compile → 写 evolve/generations.jsonl 一行 → 推 push\n"
+            "  - 如果无 src 改动 → 直接 git revert HEAD --no-edit 把上一条 autonomous commit 撤回（避免空转）"
         ),
     },
 ]
@@ -139,6 +153,6 @@ def record_done(task: dict, turn_id: str, summary: str) -> None:
 def iter_tasks(stop_check) -> Iterator[dict]:
     """无限迭代任务。stop_check() 返回 True 时退出。"""
     rng = random.Random()
-    rng.seed()  # 每次启动随机性不同
+    rng.seed()
     while not stop_check():
         yield next_task(rng)
