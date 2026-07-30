@@ -1,6 +1,7 @@
 """最简压缩：超预算时丢最早的 user/assistant/tool。"""
 from __future__ import annotations
 
+from collections import deque
 from typing import Any, Protocol
 
 
@@ -76,7 +77,11 @@ class SimpleCompression:
         单次扫描 ``messages``：
           * ``system`` 桶累计到 ``_RESERVED_SYSTEM`` 上限即停止 append
             （避免旧版"先全量收集再 [:1] 切片"的浪费分配）；
-          * ``non_system`` 全量收集，末尾再 ``[-_KEEP_RECENT:]`` 切片。
+          * ``non_system`` 用 ``deque(maxlen=_KEEP_RECENT)`` 自动驱逐最早条目
+            —— 替换原"全量收集再 ``[-_KEEP_RECENT:]`` 切片"；长消息序列下内存
+            由 ``O(N)`` 降到 ``O(_KEEP_RECENT)``，且省一次尾部分片拷贝。
+            ``deque.append`` 满了会从左端丢弃，``list(deque)`` 按插入顺序遍历，
+            与 ``non_system[-_KEEP_RECENT:]`` 语义完全一致。
 
         Args:
             messages: 待压缩的消息序列；不会被就地修改。
@@ -87,12 +92,14 @@ class SimpleCompression:
         if not self.should_compress(messages):
             return messages
         system: list[Any] = []
-        non_system: list[Any] = []
+        non_system: deque[Any] = deque(maxlen=_KEEP_RECENT)
         for m in messages:
             if m.role == "system":
                 # 满了就不再 append ——比"全收再切 [:1]"省一次 list 分配 + 一次切片。
                 if len(system) < _RESERVED_SYSTEM:
                     system.append(m)
             else:
+                # deque(maxlen=N) 满了自动从左端驱逐最早条目；append 是 O(1) 均摊。
+                # 比 list 全量 append + 末尾 ``[-N:]`` 切片省 O(N) 内存 + 1 次拷贝。
                 non_system.append(m)
-        return system + non_system[-_KEEP_RECENT:]
+        return system + list(non_system)
