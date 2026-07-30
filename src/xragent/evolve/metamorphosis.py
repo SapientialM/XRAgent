@@ -1,12 +1,12 @@
 """金蝉脱壳主流程。"""
 from __future__ import annotations
 
-import json
 import py_compile
 from typing import Any
 
 from ..config.settings import get_settings
 from ..snapshot.side_git import SideGit
+from ..watchdog.runtime_state import read as rs_read, write as rs_write
 from .generations import append_generation
 
 
@@ -57,18 +57,15 @@ def metamorphose(reason: str, entry: str = "src/xragent/main.py") -> dict[str, A
         from_head=commit_hash, to_ref=commit_hash, reason=reason,
         extra={"entry": entry, "push_ok": push_ok, "compile_ok": compile_ok},
     )
-    runtime = s.repo_root / "runtime_state.json"
-    state: dict[str, Any] = {}
-    if runtime.exists():
-        try:
-            state = json.loads(runtime.read_text(encoding="utf-8"))
-        except Exception:
-            state = {}
+    # 走 watchdog.runtime_state 的封装：
+    #   - rs_read 缺文件 / JSON 损坏时返回 {}（与原 if exists/except 等价）
+    #   - rs_write 自动 mkdir -p 父目录, ensure_ascii=False + indent=2, 中文可肉眼读
+    state = rs_read()
     state["metamorphosis_pending"] = {
         "ts": rec["ts"], "reason": reason, "new_head": commit_hash,
         "entry": entry, "compile_ok": compile_ok,
     }
-    runtime.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    rs_write(state)
     return {
         "ok": compile_ok, "head_before": head_before, "head_after": commit_hash,
         "pushed": push_ok, "push_msg": push_msg, "compile_results": compile_results, "generation": rec,
