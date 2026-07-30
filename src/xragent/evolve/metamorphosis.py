@@ -10,6 +10,34 @@ from .generations import append_generation
 
 
 def metamorphose(reason: str, entry: str = "src/xragent/main.py") -> dict:
+    """执行一次金蝉脱壳：commit 当前改动 → push → 编译 src/ → 写世代记录。
+
+    该函数是 XRAgent 自演化的"原子点"：成功后才允许 supervisor 切到新入口。
+    失败语义：
+      * push 失败不阻断（push_ok=False 但流程继续）
+      * 任意 .py 编译失败会让 ``compile_ok=False``；世代记录照写，
+        但 ``runtime_state.metamorphosis_pending.compile_ok`` 会被 supervisor
+        用来拒绝切换。
+
+    Args:
+        reason: 为什么要蜕皮（人类可读短句，会写进 generations.jsonl）。
+        entry: 新入口路径，默认 ``src/xragent/main.py``。
+
+    Returns:
+        dict 字段：
+          * ok (bool): 所有 .py 编译是否通过
+          * head_before / head_after (str): commit 前后的 HEAD
+          * pushed (bool): push 是否成功
+          * push_msg (str): push 诊断信息
+          * compile_results (list[dict]): 每个 .py 的编译结果
+          * generation (dict): 刚写入的世代记录（含 ts / from / to / reason）
+
+    Side effects:
+        - 调用 ``git add -A && git commit``（可能 no-op）
+        - 调 ``git push``
+        - 追加一行到 ``evolve/generations.jsonl``
+        - 写 ``runtime_state.json`` 的 ``metamorphosis_pending`` 字段
+    """
     s = get_settings()
     sg = SideGit()
     head_before = sg.current_head()
@@ -17,7 +45,7 @@ def metamorphose(reason: str, entry: str = "src/xragent/main.py") -> dict:
     if commit_hash is None:
         commit_hash = head_before
     push_ok, push_msg = sg.push()
-    compile_results = []
+    compile_results: list[dict] = []
     src_dir = s.repo_root / "src"
     for py in src_dir.rglob("*.py"):
         try:
@@ -31,7 +59,7 @@ def metamorphose(reason: str, entry: str = "src/xragent/main.py") -> dict:
         extra={"entry": entry, "push_ok": push_ok, "compile_ok": compile_ok},
     )
     runtime = s.repo_root / "runtime_state.json"
-    state = {}
+    state: dict = {}
     if runtime.exists():
         try:
             state = json.loads(runtime.read_text(encoding="utf-8"))
