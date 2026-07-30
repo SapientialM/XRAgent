@@ -72,10 +72,21 @@ class SideGit:
         self.settings = s
 
     def _run(self, *args: str, check: bool = True) -> str:
+        """跑一个 git 子命令，返回 stdout。
+
+        v0.3.1: 走 git_helpers.git_run, 统一 ``[git, *args]`` 构造 + RuntimeError 消息格式。
+        ``check=False`` 时 git_run 也会兜底返回空串而不抛错，便于探测类命令。
+        """
         # v0.3.1: 走 git_helpers.git_run, 统一 ``[git, *args]`` 构造 + RuntimeError 消息格式。
         return _git_run(list(args), cwd=self.root, check=check)
 
     def is_repo(self) -> bool:
+        """探测 ``self.root`` 是否在某个 git 工作树内。
+
+        Returns:
+            bool: True 表示 ``git rev-parse --is-inside-work-tree`` 成功；
+            False 表示非 git 目录（RuntimeError 被吞掉）。
+        """
         try:
             self._run("rev-parse", "--is-inside-work-tree", check=True)
             return True
@@ -83,6 +94,12 @@ class SideGit:
             return False
 
     def ensure_repo(self) -> None:
+        """惰性初始化 git 仓库。
+
+        若 :meth:`is_repo` 返回 False，自动 ``git init`` + 设 user.email / user.name
+        + ``git add -A`` + 一次 bootstrap commit。已经存在则什么都不做。
+        bootstrap commit 失败（如空仓库首次 add 失败）静默吞掉，不阻塞后续 turn。
+        """
         if not self.is_repo():
             self._run("init")
             self._run("config", "user.email", "xragent@local")
@@ -105,7 +122,23 @@ class SideGit:
             out.append(f":!{item}{suffix}")
         return out
 
-    def snapshot(self, turn_id, note="", tag=True):
+    def snapshot(self, turn_id: int | str, note: str = "", tag: bool = True) -> Snapshot:
+        """打一个 ``xragent/turn-<id>`` tag + 备份 stash。
+
+        流程：
+          1. ``ensure_repo`` 兜底（非 git 仓时初始化）；
+          2. 若 working tree 有改动，先 ``git stash push -m xragent-pre-<id>`` 备份；
+          3. 若 ``tag=True``，打 ``xragent/turn-<id>`` tag（force overwrite）；失败留空 tag 字段。
+
+        Args:
+            turn_id: turn 编号；进入 tag 名 (``xragent/turn-<id>``) 与 stash message。
+            note: tag message；超过 200 字符会被截断。
+            tag: False 时不打 tag（仅 stash 备份）。
+
+        Returns:
+            Snapshot: ``tag`` / ``pre_stash`` / ``note`` 三字段；
+            ``committed_head`` 恒为 None（commit 是 ``add_all_and_commit`` 的事）。
+        """
         self.ensure_repo()
         pre_stash = None
         if self._has_changes():
@@ -124,9 +157,22 @@ class SideGit:
         return Snapshot(tag=tag_name, pre_stash=pre_stash, note=note)
 
     def restore(self, tag: str) -> None:
+        """切到指定 tag —— ``git checkout <tag>``。
+
+        Args:
+            tag: 已存在的 tag 名（如 ``xragent/turn-7``）。
+
+        Raises:
+            RuntimeError: tag 不存在时由 ``git_run`` 抛出。
+        """
         self._run("checkout", tag)
 
     def list_snapshots(self) -> list[str]:
+        """列出所有 ``xragent/turn-*`` tag，按 creatordate 倒序。
+
+        Returns:
+            tag 名列表；非 git 仓库（RuntimeError）静默返回 ``[]``。
+        """
         try:
             out = self._run("tag", "-l", "xragent/turn-*", "--sort=-creatordate")
         except RuntimeError:
@@ -159,6 +205,14 @@ class SideGit:
         return ins + dels
 
     def current_head(self) -> str:
+        """当前 HEAD 的完整 commit hash。
+
+        Returns:
+            40 字符 hex string。
+
+        Raises:
+            RuntimeError: 空仓库 / 还没 commit 过。
+        """
         return self._run("rev-parse", "HEAD")
 
     def add_all_and_commit(self, message: str, min_diff_bytes: int = 100) -> str | None:
@@ -213,7 +267,7 @@ class SideGit:
 
     def commit_snapshot(
         self,
-        turn_id,
+        turn_id: int | str,
         note: str = "",
         min_diff_bytes: int = 100,
         tag: bool = True,
@@ -315,5 +369,18 @@ class SideGit:
         return removed
 
     def push(self, remote: str = "origin", branch: str = "main") -> tuple[bool, str]:
+        """``git push <remote> <branch>`` —— 走 git_helpers.git_push。
+
+        v0.3.1: 走 git_helpers.git_push, 统一 ``(ok, msg)`` 语义 + rc 兜底。
+        network/auth 失败时 ``ok=False`` 且 ``msg`` 含 stderr 摘要。
+
+        Args:
+            remote: 远端名，默认 ``origin``。
+            branch: 分支名，默认 ``main``。
+
+        Returns:
+            tuple[bool, str]: ``(ok, msg)`` —— ok=True 表示推送成功，msg 是 stdout 摘要；
+            ok=False 时 msg 含 stderr 或错误描述。
+        """
         # v0.3.1: 走 git_helpers.git_push, 统一 ``(ok, msg)`` 语义 + rc 兜底。
         return _git_push(cwd=self.root, remote=remote, branch=branch)
