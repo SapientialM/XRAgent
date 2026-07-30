@@ -24,16 +24,40 @@ class TurnRecord:
     error: str | None = None
 
     def to_jsonl(self) -> str:
+        """把当前 TurnRecord 序列化为单行 JSON。
+
+        Returns:
+            ``json.dumps(asdict(self), ensure_ascii=False)`` 的结果,
+            不含末尾换行（由 :meth:`TraceRecorder.write` 负责补上）。
+        """
         return json.dumps(asdict(self), ensure_ascii=False)
 
 
 class TraceRecorder:
-    def __init__(self, turns_dir: Path | None = None):
+    def __init__(self, turns_dir: Path | None = None) -> None:
+        """初始化 TraceRecorder,准备 turns 目录。
+
+        Args:
+            turns_dir: turns jsonl 写入目录;为 ``None`` 时回退到
+                ``settings.turns_dir``。无论哪种都会 ``mkdir -p``
+                确保目录存在（race-safe）。
+        """
         s = get_settings()
         self.dir = turns_dir or s.turns_dir
         self.dir.mkdir(parents=True, exist_ok=True)
 
     def write(self, rec: TurnRecord) -> Path:
+        """把一条 turn 追加写入 ``<turn_id>.jsonl``。
+
+        文件按 ``turn_id`` 分文件,append 模式;同一 turn_id 多次
+        调用会落到同一文件,方便事后 replay。
+
+        Args:
+            rec: 待写入的 turn 记录。
+
+        Returns:
+            实际写入的文件绝对路径。
+        """
         path = self.dir / f"{rec.turn_id}.jsonl"
         with path.open("a", encoding="utf-8") as f:
             f.write(rec.to_jsonl() + "\n")
@@ -41,10 +65,15 @@ class TraceRecorder:
 
 
 def new_turn_id(now: float | None = None) -> str:
-    """生成 turn id: YYYYMMDD-HHMMSS-mmm。
+    """生成 turn id: ``YYYYMMDD-HHMMSS-mmm``。
 
     Args:
-        now: 可选 epoch 秒,用于测试时注入固定时间。
+        now: 可选 epoch 秒,用于测试时注入固定时间。``None`` 表示用
+            ``time.time()`` 当前值。
+
+    Returns:
+        时间格式字符串 ID,例如 ``"20260125-143022-123"``。秒以下
+        部分用 ``int(t*1000) % 1000`` 取毫秒,确保同秒多次调用能区分。
     """
     t = now if now is not None else time.time()
     return time.strftime("%Y%m%d-%H%M%S", time.localtime(t)) + f"-{int(t * 1000) % 1000:03d}"
