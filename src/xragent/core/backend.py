@@ -93,6 +93,19 @@ class MockBackend:
 
     @staticmethod
     def _parse_line_obj(d: dict) -> Turn:
+        """把剧本 dict 解析成 :class:`Turn`。
+
+        这是 ``_parse_line`` 与 ``DEFAULT_SCRIPT`` 共用的纯数据转换,
+        抽出来便于两条路径在缺字段时回落到一致的默认值。
+
+        Args:
+            d: 单条剧本条目, 期望含 ``content`` / ``tool_calls`` /
+                ``finish_reason`` / ``usage``, 字段缺失时用空值。
+
+        Returns:
+            Turn: 完整字段的 Turn; ``tool_calls`` 列表里的每个元素
+                按 ``ToolCall(**tc)`` 展开, 字段名不匹配会抛 ``TypeError``。
+        """
         return Turn(
             content=d.get("content", ""),
             tool_calls=[ToolCall(**tc) for tc in d.get("tool_calls", [])],
@@ -101,6 +114,20 @@ class MockBackend:
         )
 
     def _parse_line(self, line: str) -> Turn:
+        """把剧本文件中的一行 JSON 解析为 :class:`Turn`。
+
+        ``line`` 必须是合法 JSON object 字符串, 空行在 ``__init__`` 的
+        list comp 里已被 walrus 过滤掉, 这里不再处理。
+
+        Args:
+            line: 已经 ``strip()`` 过的非空行, 内容为 JSON object。
+
+        Returns:
+            Turn: 经 :meth:`_parse_line_obj` 转换后的 Turn。
+
+        Raises:
+            json.JSONDecodeError: ``line`` 不是合法 JSON (由 ``json.loads`` 抛出)。
+        """
         return self._parse_line_obj(json.loads(line))
 
     def chat(self, messages: list[Message], tools: list[ToolSpec]) -> Turn:

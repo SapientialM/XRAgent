@@ -80,7 +80,23 @@ class MemoryManager:
         "ON facts(confidence DESC, ts DESC)",
     ]
 
-    def __init__(self, db_path=None):
+    def __init__(self, db_path=None) -> None:
+        """打开 SQLite 连接, 初始化 schema 并跑一遍所有 migration。
+
+        DB 来源优先级: 显式 ``db_path`` > ``settings.memory_db`` (通常为
+        ``<repo_root>/memory/long_term/facts.db``); 通过
+        :func:`xragent.config.settings.get_settings` 解析。
+
+        启用 ``journal_mode=WAL`` + ``foreign_keys=ON``,并把 ``row_factory``
+        设成 :class:`sqlite3.Row` 让所有查询返回字典式行。
+
+        Args:
+            db_path: 可选路径覆盖; ``None`` 时用 settings.memory_db。
+
+        Side effects:
+            打开 :class:`sqlite3.Connection`、执行 ``_init_schema`` 与
+            ``_migrate_all``,首次会创建 ``facts`` 表和所有索引。
+        """
         from xragent.config.settings import get_settings
 
         s = get_settings()
@@ -94,6 +110,11 @@ class MemoryManager:
         self._migrate_all()
 
     def close(self) -> None:
+        """关闭底层 SQLite 连接, 释放 file handle。
+
+        用 ``try/except sqlite3.ProgrammingError`` 吞掉重复关闭的报错,
+        让外部 ``with`` 风格或显式 ``close()`` 多次调用都安全。
+        """
         with self._lock:
             try:
                 self._conn.close()
@@ -103,6 +124,11 @@ class MemoryManager:
     # ---- schema ----
 
     def _init_schema(self) -> None:
+        """``CREATE TABLE IF NOT EXISTS`` + 全部索引, 幂等。
+
+        一个事务里先建表后建索引, 避免并发场景下表还没建好就被查询。
+        后续 :meth:`_migrate_all` 会按 schema 版本补字段 / 索引。
+        """
         with self._lock, self._conn:
             self._conn.executescript(self._TABLE_DDL)
             for ddl in self._INDEXES_DDL:
@@ -245,6 +271,17 @@ class MemoryManager:
         )
 
     def _row_to_fact(self, r: sqlite3.Row) -> Fact:
+        """把 :class:`sqlite3.Row` 转成 :class:`Fact` dataclass。
+
+        ``tags`` 字段在 DB 里是 JSON 字符串, 这里 ``json.loads`` 反序列化;
+        解析失败时回退空列表, 避免因单行坏数据让整条 recall 链抛错。
+
+        Args:
+            r: ``SELECT * FROM facts`` 返回的单行, 必须含 :class:`Fact` 全字段。
+
+        Returns:
+            Fact: 行内容映射出的 Fact; ``archived`` 转 ``bool``, ``tags`` 转 ``list[str]``。
+        """
         import json as _json
 
         try:
@@ -341,6 +378,14 @@ class MemoryManager:
         return [self._row_to_fact(r) for r in rows]
 
     def count(self) -> int:
+        """返回 ``facts`` 表总行数 (含 archived)。
+
+        用于 /diag 类自检命令和 pytest fixture; 不区分 archived, 想看
+        活跃数量请改用 :meth:`count_active`。
+
+        Returns:
+            int: ``SELECT COUNT(*) FROM facts`` 的结果。
+        """
         with self._lock:
             return self._conn.execute("SELECT COUNT(*) AS c FROM facts").fetchone()["c"]
 
