@@ -18,6 +18,10 @@ _last_answer_box: "dict | None" = None
 _http_reply_queue: "queue.Queue[dict]" = queue.Queue()
 _loop_ref: list = []
 
+# HTTP 父母通道常量
+# _http_approval_channel 等父母审批回复的最大等待时间；超时返回 REJECT。
+HTTP_REPLY_TIMEOUT_S: float = 120.0
+
 
 def register_input_queue(q: "queue.Queue") -> None:
     """main.py 注册共享输入队列；HTTP /message 直接 put。"""
@@ -61,11 +65,11 @@ def start_server_background(loop: "ReActLoop") -> None:
 def _http_approval_channel(req: Any) -> Any:
     """HTTP 版的审批 channel：从 reply queue 取一次审批结果。
 
-    超时 120s；任何异常都返回 REJECT 避免 Agent 卡死。
+    超时 ``HTTP_REPLY_TIMEOUT_S`` 秒；任何异常都返回 REJECT 避免 Agent 卡死。
     """
     from .hitl.gate import ApprovalResult, Decision
     try:
-        reply = _http_reply_queue.get(timeout=120)
+        reply = _http_reply_queue.get(timeout=HTTP_REPLY_TIMEOUT_S)
         decision = Decision(reply.get("decision", "reject"))
         return ApprovalResult(decision=decision, edited_args=reply.get("new_args"), reason=reply.get("reason", ""))
     except Exception as e:
@@ -92,6 +96,19 @@ def _make_handler(token: str) -> type:
                 return True
             return self.headers.get("Authorization", "") == f"Bearer {token}"
 
+        def _auth_gate(self) -> bool:
+            """统一 token 鉴权入口；未通过时已发 401，调用方直接 return。
+
+            把 do_GET / do_POST 顶部重复的 4 行 token 检查 + 401 响应收敛到一处。
+
+            Returns:
+                True = 通过；False = 已发送 401 响应，调用方应直接 return。
+            """
+            if self._check_token():
+                return True
+            self._send_json(401, {"error": "unauthorized"})
+            return False
+
         def _send_json(self, code: int, payload: dict) -> None:
             """把 payload 序列化为 JSON（UTF-8）并以 application/json 响应。"""
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -115,10 +132,24 @@ def _make_handler(token: str) -> type:
             except Exception:
                 return None
 
+        def _handle_health(self) -> None:
+            """GET /health：返回 runtime_state 健康快照（pid/heartbeat/restart_count）。
+
+            从 do_GET 中抽出，让 do_GET 只剩路径分发。
+            """
+            import os
+            from .watchdog import runtime_state as rs
+            st = rs.read()
+            self._send_json(200, {
+                "ok": True, "pid": os.getpid(),
+                "heartbeat_ts": st.get("heartbeat_ts"),
+                "restart_count": st.get("restart_count", 0),
+                "metamorphosis_pending": bool(st.get("metamorphosis_pending")),
+            })
+
         def do_GET(self) -> None:
             """处理 GET /last-answer 与 GET /health；其他路径返回 404。"""
-            if not self._check_token():
-                self._send_json(401, {"error": "unauthorized"})
+            if not self._auth_gate():
                 return
             if self.path == "/last-answer":
                 if _last_answer_box is None:
@@ -127,22 +158,13 @@ def _make_handler(token: str) -> type:
                 self._send_json(200, {"answer": _last_answer_box["answer"], "ts": _last_answer_box["ts"]})
                 return
             if self.path == "/health":
-                import os
-                from .watchdog import runtime_state as rs
-                st = rs.read()
-                self._send_json(200, {
-                    "ok": True, "pid": os.getpid(),
-                    "heartbeat_ts": st.get("heartbeat_ts"),
-                    "restart_count": st.get("restart_count", 0),
-                    "metamorphosis_pending": bool(st.get("metamorphosis_pending")),
-                })
+                self._handle_health()
                 return
             self._send_json(404, {"error": "not found"})
 
         def do_POST(self) -> None:
             """处理 POST /message（入队）与 POST /approve（回复 HITL gate）；其他路径返回 404。"""
-            if not self._check_token():
-                self._send_json(401, {"error": "unauthorized"})
+            if not self._auth_gate():
                 return
             body = self._read_json() or {}
             if self.path == "/message":
