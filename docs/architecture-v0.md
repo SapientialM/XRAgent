@@ -1,7 +1,7 @@
 # XRAgent 架构摘要（v0.1 出生版）
 
 > 完整方案在多次迭代中展开；此文档是 v0.1 出生时的快速地图。
-> 当代码与本文档冲突时：**代码为准**，并在 `docs/adr/` 记录决策。详见 [ADR-0002](adr/0002-architecture-v0-sync.md)。
+> 当代码与本文档冲突时：**代码为准**，并在 `docs/adr/` 记录决策。详见 [ADR-0002](adr/0002-architecture-v0-sync.md) / [ADR-0003](adr/0003-snapshot-retention-v0.2.3.md)。
 
 ## 一、五大核心
 
@@ -10,7 +10,7 @@
 | 梦想 | `AGENTS.md` + `core/dream.py` + `core/react_loop.py`（ReAct 主循环）+ `core/backend.py`（LLM 适配） |
 | 父母 | `hitl/gate.py` + `http_server.py` |
 | 生活 | `tools/blacklist.py`（仓库根路径围栏 + 黑名单） |
-| 记忆 | `memory/manager.py` + `core/turn.py` + `snapshot/side_git.py` |
+| 记忆 | `memory/manager.py` + `core/turn.py` + `snapshot/side_git.py`（v0.2+ 含 cleanup 入口，见 ADR-0003） |
 | 成长 | `evolve/metamorphosis.py` + `evolve/generations.py` + `autonomous.py`（自驱动循环） |
 
 补充说明：
@@ -28,7 +28,7 @@
 
 ```
 src/xragent/
-├── config/settings.py         # pydantic-settings
+├── config/settings.py         # pydantic-settings（v0.2.3 + snapshot_retention_days，见 ADR-0003 D3）
 ├── core/dream.py              # AGENTS.md 加载
 ├── core/backend.py            # BackendProtocol + Mock + LangChain
 ├── core/turn.py               # TurnRecord + TraceRecorder
@@ -37,6 +37,7 @@ src/xragent/
 ├── compression/simple.py      # 最简压缩（SimpleCompression.compress）
 ├── compression/hook.py        # 压缩策略注册表（已注册 simple）
 ├── snapshot/side_git.py       # 每个 turn snapshot
+│                             # v0.2.3 新增 cleanup_old_snapshots(max_age_days, dry_run)（见 ADR-0003 D1/D4）
 ├── hitl/gate.py               # 三态决策
 ├── tools/blacklist.py         # PathSandbox + binary 黑名单
 ├── tools/registry.py          # 14 工具注册（见下）
@@ -92,6 +93,7 @@ src/xragent/
 5. **同记忆**：facts.db + diary/turns/ + generations.jsonl 在仓库根，跨重启保留
 6. **SideGit 不动源代码**：snapshot 只 stash tracked changes（v0.1 修复后）
 7. **代码 / 文档单一真相源**：当代码与本文档冲突时以代码为准，差异在 `docs/adr/` 留痕
+8. **snapshot 保留天数可配**：`Settings.snapshot_retention_days`（默认 30）；≤0 禁用清理；仅匹配 `xragent/turn-*` 前缀（见 ADR-0003 D3/D4）
 
 ## 五、24h 自愈协议
 
@@ -116,8 +118,9 @@ POST /approve {id,...}→ 回复 HITL gate 一次（用于 HITL HTTP 通道）
 
 ## 七、演进路线
 
-- v0.1 (current)：出生 — ReAct + **14 工具** + HITL + Side-Git + Dream + Diary + 蜕皮 + HTTP 父母 + 自驱动循环
+- v0.1 (current，**实际已演化为 v0.2.3**；增量见 ADR-0003)：出生 — ReAct + **14 工具** + HITL + Side-Git + Dream + Diary + 蜕皮 + HTTP 父母 + 自驱动循环
   + **压缩 hook 已接入**（react_loop 每轮调用 memory.compress_if_needed，v0.3 仅做强化而非启用）
+  + **snapshot 保留**：v0.2.3 新增 `cleanup_old_snapshots()` + `Settings.snapshot_retention_days`
 - v0.2：多 LLM provider 适配（OpenAI / DeepSeek / GLM / Mock；`llm/` 包已留空 stub）
 - v0.3：长期记忆强化（recall 工具 + 摘要压缩 hook **强化**——按 category 索引、压缩策略可热替换）
 - v0.4：评分基线（每个 turn 加 score）
@@ -134,5 +137,6 @@ POST /approve {id,...}→ 回复 HITL gate 一次（用于 HITL HTTP 通道）
 
 - [`docs/agent-capabilities.md`](agent-capabilities.md) — 父母写给 Agent 的能力清单 + 资料
 - [`docs/adr/0001-util-extraction-and-autonomous.md`](adr/0001-util-extraction-and-autonomous.md) — util/ 抽出 + 自驱动循环决策
-- [`docs/adr/0002-architecture-v0-sync.md`](adr/0002-architecture-v0-sync.md) — 本次同步：util 模块数 / CLI flags / 压缩 hook 状态
+- [`docs/adr/0002-architecture-v0-sync.md`](adr/0002-architecture-v0-sync.md) — 上次同步：util 模块数 / CLI flags / 压缩 hook 状态
+- [`docs/adr/0003-snapshot-retention-v0.2.3.md`](adr/0003-snapshot-retention-v0.2.3.md) — 本次同步：snapshot 保留策略 + 文档与 v0.2.3 代码的漂移
 - [`ROADMAP.md`](../ROADMAP.md) — 版本进度
