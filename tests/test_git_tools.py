@@ -18,14 +18,23 @@ git_push(remote, branch) → dict
     - 默认参数是 ("origin", "main")，与 SideGit.push 默认一致
     - 自定义 remote/branch 被正确透传到底层 git push
     - ok 一定是 bool、msg 一定是 str（LLM 解析契约）
+
+snapshot_cleanup(max_age_days, dry_run) → dict (v0.5.5)
+    - dry_run=True 列出候选 tag 不删;dry_run=False 真的删
+    - 严格只含 3 个键: ok / removed / dry_run
+    - dry_run 字段透传输入
+    - ``SideGit.cleanup_old_snapshots`` 本身语义在
+      ``tests/test_sidegit_cleanup.py`` 锁, 本文件只覆盖 *包装层契约*
 """
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
+from xragent.snapshot.side_git import SideGit
 from xragent.tools import git_tools
 
 
@@ -271,3 +280,99 @@ def test_git_commit_then_push_chain_does_not_raise(repo_root: Path):
     # 没有 origin → 失败，但函数不能崩
     assert pr["ok"] is False
     assert isinstance(pr["msg"], str)
+
+# ---------------------------------------------------------------------------
+# snapshot_cleanup (v0.5.5 工具包装层契约)
+# ---------------------------------------------------------------------------
+
+
+def _make_annotated_tag(repo: Path, tag: str, message: str, unix_ts: int) -> None:
+    """把 annotated tag 的 creatordate 倒拨到 unix_ts。
+
+    复制自 ``tests/test_sidegit_cleanup.py`` 的同款 helper —— 用
+    GIT_COMMITTER_DATE / GIT_AUTHOR_DATE 倒拨, 无需 monkeypatch 真实时钟。
+    本测试只关心 *工具包装层* 的契约 (3-key dict / dry_run 透传 / 异常
+    兜底), ``SideGit.cleanup_old_snapshots`` 本身的语义在那边锁。
+    """
+    import os
+    import time as _time
+    import subprocess as _sp
+
+    env = os.environ.copy()
+    iso = _time.strftime("%Y-%m-%dT%H:%M:%S", _time.gmtime(unix_ts))
+    env["GIT_COMMITTER_DATE"] = iso
+    env["GIT_AUTHOR_DATE"] = iso
+    _sp.run(
+        ["git", "tag", "-a", tag, "-m", message],
+        cwd=str(repo),
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_snapshot_cleanup_tool_wrapper_contract(repo_root: Path):
+    """``snapshot_cleanup`` 包装层契约 (v0.5.5 新增):
+
+    1. dry_run=True → ``removed`` 列出候选, tag 仍在磁盘 (不删)
+    2. 紧接着 dry_run=False → ``removed`` 是同一列表, tag 真正消失
+    3. 返回值严格只含 3 个键 (LLM 工具契约):
+       ``ok`` (bool) / ``removed`` (list[str]) / ``dry_run`` (bool)
+    4. ``dry_run`` 字段必须透传输入, 便于 LLM 区分 "预览" vs "实删"
+    5. ``max_age_days=None`` 走 settings, 不抛异常
+
+    ``SideGit.cleanup_old_snapshots`` 本体的边界条件 (前缀匹配 / 禁用 /
+    空候选) 在 ``tests/test_sidegit_cleanup.py`` 锁, 本测试不复用。
+    """
+    sg = SideGit()
+    sg.ensure_repo()
+
+    now = int(time.time())
+    old_ts = now - 40 * 86400  # 40 天前 → 必被默认 30 天策略命中
+    _make_annotated_tag(repo_root, "xragent/turn-v055-old", "old", old_ts)
+
+    # --- 1. dry_run=True: 列候选, 不删 ---
+    preview = git_tools.snapshot_cleanup(dry_run=True)
+    assert isinstance(preview, dict)
+    assert set(preview.keys()) == {"ok", "removed", "dry_run"}, (
+        f"工具契约漂移: 多了/少了字段 {set(preview.keys())}"
+    )
+    assert preview["ok"] is True
+    assert preview["dry_run"] is True
+    assert preview["removed"] == ["xragent/turn-v055-old"]
+
+    # tag 仍在 (dry_run 不删)
+    still = subprocess.run(
+        ["git", "tag", "--list", "xragent/turn-v055-old"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "xragent/turn-v055-old" in still.stdout, (
+        "dry_run=True 不应实际删除 tag"
+    )
+
+    # --- 2. dry_run=False: 真的删 ---
+    result = git_tools.snapshot_cleanup(dry_run=False)
+    assert result["ok"] is True
+    assert result["dry_run"] is False
+    assert result["removed"] == ["xragent/turn-v055-old"]
+
+    gone = subprocess.run(
+        ["git", "tag", "--list", "xragent/turn-v055-old"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert gone.stdout.strip() == "", (
+        f"实删后 tag 仍在: {gone.stdout!r}"
+    )
+
+    # --- 3. 第二次调用: 没候选 → removed=[] ---
+    empty = git_tools.snapshot_cleanup(dry_run=False)
+    assert empty["ok"] is True
+    assert empty["removed"] == []
+    assert empty["dry_run"] is False

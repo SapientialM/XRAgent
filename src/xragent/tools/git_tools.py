@@ -13,6 +13,12 @@
     裸本地仓库里几乎不可能超时;真要卡也由 ``SideGit`` 内的 ``RuntimeError``
     抛出后被 ``registry`` 的兜底 ``except Exception`` 转成 ``ok=False``,
     与现有契约一致。
+
+**v0.5.5 snapshot_cleanup**: 加 ``snapshot_cleanup`` 薄包装,把
+``SideGit.cleanup_old_snapshots`` 暴露成 ``medium`` 风险工具 (只动本地
+``xragent/turn-*`` tag, 不走网络, tag 从 commit 可恢复 — 不需要 HITL
+审批)。该函数本体已在 ``tests/test_sidegit_cleanup.py`` 锁住,本文件
+只新增包装层 + 1 条工具契约测试。
 """
 from __future__ import annotations
 
@@ -126,3 +132,41 @@ def git_push(
         "ok": result.returncode == 0,
         "msg": (result.stderr or result.stdout).strip(),
     }
+
+
+def snapshot_cleanup(
+    max_age_days: int | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """清理 N 天前的 ``xragent/turn-*`` snapshot tag（薄包装）。
+
+    委托给 :meth:`SideGit.cleanup_old_snapshots` — 该方法的完整契约
+    (仅命中 ``xragent/turn-*`` 前缀 / ``<=0`` 禁用 / ``dry_run`` 仅列候选
+    / 非 git 仓库静默返 ``[]``) 已在 ``tests/test_sidegit_cleanup.py``
+    里锁住。本函数只负责把返回值包成 LLM 工具契约字典 + 异常兜底。
+
+    风险等级 ``medium``: 只动本地 git tag, 不走网络, tag 从 commit hash
+    可恢复 (``git tag <name> <commit>``), 默认 30 天保留, 不需要 HITL
+    审批。Agent 可随时调用做日常维护。
+
+    Args:
+        max_age_days: 保留天数; ``None`` 走
+            :attr:`Settings.snapshot_retention_days` (默认 30)。
+            ``<= 0`` 在 SideGit 层会被禁用并返回空列表。
+        dry_run: True 仅列候选 tag, 不实际删除。
+
+    Returns:
+        严格只含 3 个键的 dict (LLM 工具契约):
+            * ``ok`` (bool): True 表示调用成功完成 (即使没删任何 tag)
+            * ``removed`` (list[str]): 被删除的 tag 名列表 (按 creatordate
+                旧→新排序); ``dry_run=True`` 时是候选列表
+            * ``dry_run`` (bool): 透传输入, 便于 LLM 区分 "预览" vs "实删"
+    """
+    try:
+        removed = SideGit().cleanup_old_snapshots(
+            max_age_days=max_age_days,
+            dry_run=dry_run,
+        )
+    except Exception as e:  # noqa: BLE001 - 兜底转 ok=False
+        return _fail(f"{type(e).__name__}: {e}")
+    return {"ok": True, "removed": list(removed), "dry_run": dry_run}

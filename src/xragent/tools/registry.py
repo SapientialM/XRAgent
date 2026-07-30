@@ -164,7 +164,7 @@ def build_default_registry() -> ToolRegistry:
       * low: read_file / list_dir / memory_save / memory_recall /
         memory_recall_range / memory_top_frequent / memory_recall_by_tag /
         diary_write
-      * medium: curl_url / web_search
+      * medium: curl_url / web_search / snapshot_cleanup
       * high: write_file / run_cmd / git_commit / git_push /
         propose_self_replace / terminate（需 HITL 审批）
 
@@ -217,6 +217,12 @@ def build_default_registry() -> ToolRegistry:
             "timeout_s": {"type": "number", "default": 30, "description": "push 超时秒数；None / 非正数 / 非数值 → 默认 30s"},
         }},
         "high", git_tools.git_push)
+    add("snapshot_cleanup", "清理 N 天前的 xragent/turn-* snapshot tag（仅本地，不走网络，可恢复）。默认 30 天；max_age_days<=0 禁用；dry_run=True 仅列候选。",
+        {"type": "object", "properties": {
+            "max_age_days": {"type": "integer", "description": "保留天数；None 走 settings.snapshot_retention_days；<=0 禁用"}, 
+            "dry_run": {"type": "boolean", "default": False, "description": "True 仅列候选 tag 不实际删除"},
+        }},
+        "medium", git_tools.snapshot_cleanup)
     add("memory_save", "向长期记忆写入一条 fact（SQLite）。",
         {"type": "object", "properties": {"category": {"type": "string"}, "content": {"type": "string"}}, "required": ["category", "content"]},
         "low", memory_tools.memory_save)
