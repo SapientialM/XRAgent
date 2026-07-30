@@ -24,10 +24,18 @@ side_git 和 subprocess_utils 里同时被看到, 现有测试不需要改。
 **v0.5 refactor (本轮)**: 删除仅 1 处调用的 ``_to_tuple`` helper, 改为内联 —
 违反"不抽只调用一次的 helper"原则; ``run_capture`` 顶层已经 cover 了"完成
 subprocess 调用并提取三件套"职责, 再抽一层反而割裂语义。净 -3 行。
+
+**v0.6 typing fix (本轮)**: ``cwd`` 类型从 ``Path | str | None`` 收紧为
+``os.PathLike[str] | str | None`` — ``pathlib.Path`` 实际是 ``os.PathLike``
+子类, 直接收紧更能反映 ``subprocess.run`` 真实接受的范围; 顺手补上原本缺失
+的 ``from pathlib import Path`` import, 避免 mypy 在 ``from __future__ import
+annotations`` 模式下报 ``NameError: Path``。净 +2 / ~1 行。
 """
 from __future__ import annotations
 
+import os
 import subprocess
+from pathlib import Path
 
 
 # ``returncode`` 哨兵: 表示"运行过程本身失败"（timeout / binary 缺失 / OS error）,
@@ -37,7 +45,7 @@ RC_RUNTIME_FAIL: int = -1
 
 def run_capture(
     cmd: list[str],
-    cwd: Path | str | None = None,
+    cwd: os.PathLike[str] | str | None = None,
     *,
     timeout: int | float | None = None,
     encoding: str = "utf-8",
@@ -46,8 +54,9 @@ def run_capture(
 
     Args:
         cmd: 命令列表 (e.g. ``["git", "status"]``)
-        cwd: 工作目录 (``Path`` / ``str`` / ``None``); ``None`` = 当前进程 cwd。
-            自 Python 3.6 起 ``subprocess.run`` 原生接受 ``os.PathLike``, 无需 ``str()`` 转换。
+        cwd: 工作目录 (``os.PathLike[str]`` / ``str`` / ``None``); ``None`` = 当前进程 cwd。
+            自 Python 3.6 起 ``subprocess.run`` 原生接受 ``os.PathLike`` (``Path`` 是
+            其子类), 无需 ``str()`` 转换。
         timeout: 传给 ``subprocess.run`` 的超时秒数
         encoding: stdout/stderr 的文本编码 (默认 ``"utf-8"``)
 
