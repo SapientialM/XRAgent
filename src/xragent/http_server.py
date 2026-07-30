@@ -5,7 +5,7 @@ import json
 import queue
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from .config.settings import get_settings
 
@@ -241,8 +241,40 @@ def _make_handler(token: str) -> type:
             except Exception:
                 return None
 
-        def _handle_health(self) -> None:
-            """GET /health：返回 runtime_state 健康快照（pid/heartbeat/restart_count）。
+        def _dispatch(
+            self,
+            routes: "dict[str, Callable[[dict | None], None]]",
+            body: "dict | None",
+        ) -> None:
+            """按 ``self.path`` 在 ``routes`` 表里查 handler；缺失返回 404。
+
+            把 ``do_GET`` / ``do_POST`` 里重复的「if path == X: ...; 末尾 404
+            收尾」收敛成 dispatch table；新增 endpoint 只需往 ``routes`` dict
+            加一行，不用动方法分发逻辑。
+
+            Args:
+                routes: path → handler 映射；handler 签名统一为
+                    ``(body: dict | None) -> None``，``do_GET`` 传 ``None``，
+                    ``do_POST`` 传 ``_read_json() or {}``。
+                body: 已解析的 POST body（GET 路径下为 ``None``）。
+            """
+            handler = routes.get(self.path)
+            if handler is None:
+                self._send_json(404, {"error": "not found"})
+                return
+            handler(body)
+
+        # === handler methods（被 _dispatch 通过 routes dict 间接调用） ===
+
+        def _handle_last_answer(self, _body: "dict | None") -> None:
+            """``GET /last-answer``：返回最近一次 LLM answer。"""
+            if _last_answer_box is None:
+                self._send_json(503, {"error": "not ready"})
+                return
+            self._send_json(200, {"answer": _last_answer_box["answer"], "ts": _last_answer_box["ts"]})
+
+        def _handle_health(self, _body: "dict | None") -> None:
+            """``GET /health``：返回 runtime_state 健康快照（pid/heartbeat/restart_count）。
 
             从 do_GET 中抽出，让 do_GET 只剩路径分发。
             """
@@ -256,38 +288,39 @@ def _make_handler(token: str) -> type:
                 "metamorphosis_pending": bool(st.get("metamorphosis_pending")),
             })
 
+        def _handle_message(self, body: "dict") -> None:
+            """``POST /message``：把父母消息塞进共享输入队列。
+
+            空文本返 400；合法时回 200 + 文本预览。
+            """
+            text = _coerce_text(body.get("text"))
+            if not text:
+                self._send_json(400, {"error": "empty text"})
+                return
+            enqueue_message(text)
+            self._send_json(200, {"ok": True, "queued": text[:_TEXT_PREVIEW_CHARS]})
+
+        def _handle_approve(self, body: "dict") -> None:
+            """``POST /approve``：把审批 payload put 进 reply queue 喂给 HITL gate。"""
+            _http_reply_queue.put(body)
+            self._send_json(200, {"ok": True})
+
         def do_GET(self) -> None:
-            """处理 GET /last-answer 与 GET /health；其他路径返回 404。"""
+            """处理 ``GET /last-answer`` 与 ``GET /health``；其他路径返回 404。"""
             if not self._auth_gate():
                 return
-            if self.path == "/last-answer":
-                if _last_answer_box is None:
-                    self._send_json(503, {"error": "not ready"})
-                    return
-                self._send_json(200, {"answer": _last_answer_box["answer"], "ts": _last_answer_box["ts"]})
-                return
-            if self.path == "/health":
-                self._handle_health()
-                return
-            self._send_json(404, {"error": "not found"})
+            self._dispatch({
+                "/last-answer": self._handle_last_answer,
+                "/health":      self._handle_health,
+            }, None)
 
         def do_POST(self) -> None:
-            """处理 POST /message（入队）与 POST /approve（回复 HITL gate）；其他路径返回 404。"""
+            """处理 ``POST /message``（入队）与 ``POST /approve``（回复 HITL gate）；其他路径返回 404。"""
             if not self._auth_gate():
                 return
-            body = self._read_json() or {}
-            if self.path == "/message":
-                text = _coerce_text(body.get("text"))
-                if not text:
-                    self._send_json(400, {"error": "empty text"})
-                    return
-                enqueue_message(text)
-                self._send_json(200, {"ok": True, "queued": text[:_TEXT_PREVIEW_CHARS]})
-                return
-            if self.path == "/approve":
-                _http_reply_queue.put(body)
-                self._send_json(200, {"ok": True})
-                return
-            self._send_json(404, {"error": "not found"})
+            self._dispatch({
+                "/message": self._handle_message,
+                "/approve": self._handle_approve,
+            }, self._read_json() or {})
 
     return Handler
