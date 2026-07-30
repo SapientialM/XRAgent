@@ -191,7 +191,7 @@ def build_default_registry() -> ToolRegistry:
         """
         r.register(ToolDef(name=name, description=desc, input_schema=schema, risk=risk, handler=fn))
 
-    add("read_file", "读取仓库内文本文件，可选 max_bytes 截断（仅返回首 N 字节；超出时 truncated=True）。",
+    add("read_file", "读取仓库内文本文件，可选 max_bytes 截断（仅返回首 N 字节；超出时 truncated=True）。返回字段含 original_size（文件原始字节数，恒报）与 size（返回字符数）。",
         {"type": "object", "properties": {
             "path": {"type": "string"},
             "max_bytes": {"type": "integer", "minimum": 1,

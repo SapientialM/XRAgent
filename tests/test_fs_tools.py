@@ -6,7 +6,8 @@
 我们严格按 *当前* 实现写测试（不多不少）：
 
 * read_file
-    - 已存在的普通 utf-8 文件 → ok=True，含 content + size + 相对路径
+    - 已存在的普通 utf-8 文件 → ok=True，含 content + size + original_size +
+      truncated + 相对路径 (original_size 是文件原始字节数, size 是返回字符数)
     - 缺失文件 → ok=False
     - 路径指向目录 → ok=False
     - 路径越出 repo_root（绝对路径 & ../ 逃逸）→ ok=False 含 "目标越界"
@@ -64,6 +65,9 @@ def test_read_file_happy_path_returns_relative_path_and_content(repo_root: Path)
     assert out["content"] == "hello\nworld\n"
     # v0.2 新增 truncated 字段；默认 max_bytes=None 时必须 False
     assert out["truncated"] is False
+    # v0.3 新增 original_size: 始终报告磁盘上的原始字节数, 即使未截断
+    assert out["original_size"] == len("hello\nworld\n")
+    assert out["original_size"] == out["size"]  # ASCII 场景下两者相等
 
 
 def test_read_file_missing_target_returns_ok_false(repo_root: Path):
@@ -119,6 +123,7 @@ def test_read_file_max_bytes_default_is_backward_compatible(repo_root: Path):
     assert out_default == out_explicit
     assert out_default["ok"] is True
     assert out_default["size"] == 600
+    assert out_default["original_size"] == 600  # v0.3: 全文读时 original_size == size
     assert out_default["truncated"] is False
     assert len(out_default["content"]) == 600
 
@@ -148,6 +153,9 @@ def test_read_file_max_bytes_truncates_and_marks_flag(repo_root: Path):
     assert len(out["content"]) == 123
     # ASCII 场景下 size (chars) == bytes
     assert out["size"] == 123
+    # v0.3: original_size 报告文件真实字节数, 截断下必 > size
+    assert out["original_size"] == 10_000
+    assert out["original_size"] > out["size"]
 
 
 def test_read_file_max_bytes_invalid_values_fall_back_to_unlimited(repo_root: Path):
@@ -165,6 +173,44 @@ def test_read_file_max_bytes_invalid_values_fall_back_to_unlimited(repo_root: Pa
         assert out["ok"] is True, f"max_bytes={bad!r} should fall back to unlimited"
         assert out["content"] == "payload"
         assert out["truncated"] is False, f"max_bytes={bad!r} must not pretend it truncated"
+
+
+def test_read_file_reports_original_size_for_non_truncated_utf8(repo_root: Path):
+    """v0.3 contract: original_size 恒报原始字节数, 非 ASCII 下与 size (字符数) 不一致。
+
+    动机: LLM 单次 read 就要知道文件总字节量, 多字节 UTF-8 下 size/original_size
+    故意分开——size 对应"我看到的文本长度", original_size 对应"max_bytes 操作的
+    字节预算"。这一 case 锁住两边都报且数字不同。
+    """
+    f = repo_root / "sandbox" / "utf8_note.txt"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    payload = "中文abc"  # 中=3 bytes × 2 + a,b,c = 9 bytes, 5 chars
+    f.write_text(payload, encoding="utf-8")
+
+    out = read_file("sandbox/utf8_note.txt")
+    assert out["ok"] is True
+    assert out["truncated"] is False
+    assert out["size"] == 5            # 5 chars returned
+    assert out["original_size"] == 9   # 9 bytes on disk
+    assert out["original_size"] != out["size"]
+
+
+def test_read_file_original_size_reflects_actual_disk_size(repo_root: Path):
+    """v0.3 contract: 即使 max_bytes 截断, original_size 仍报原始字节数。
+
+    这条是 LLM 决策核心——"我看到的 vs 文件实际有多大", 不能因为截断就
+    把 original_size 报成 size (那样 LLM 会误以为全文都看完了)。
+    """
+    f = repo_root / "sandbox" / "huge.log"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_bytes(b"x" * 5000)  # 5000 bytes on disk
+
+    out = read_file("sandbox/huge.log", max_bytes=50)
+    assert out["ok"] is True
+    assert out["truncated"] is True
+    assert out["original_size"] == 5000
+    assert out["size"] == 50
+    assert out["original_size"] > out["size"]
 
 
 def test_read_file_max_bytes_at_multi_byte_boundary_does_not_crash(repo_root: Path):

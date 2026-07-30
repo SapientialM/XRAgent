@@ -107,6 +107,14 @@ def read_file(path: str, max_bytes: int | None = None) -> dict[str, Any]:
     真正超出时返回的 ``truncated`` 字段会标 True, 让 LLM 知道有字节
     被截掉、可能要换 ``list_dir`` / ``memory_recall`` 等更轻的工具。
 
+    v0.3 新增 ``original_size`` 字段: 始终报告文件在磁盘上的原始字节
+    数 (``stat().st_size``), 即便 ``truncated=False`` 也带上。
+    动机是让 LLM 单次 read 就能判断 "这个文件总共多大 / 我看到的是不是
+    全部", 不用额外再走 ``list_dir`` + 算 size。多字节 UTF-8 下
+    ``size`` 是返回的 *字符* 数, ``original_size`` 是 *字节* 数, 两个
+    数字在非 ASCII 内容下会不一致——这是有意的 (size 对应 LLM 看到的
+    文本长度, original_size 对应 max_bytes 操作的字节预算)。
+
     失败路径统一返回 ``_fail(error)``:
       * 越界 → 由 PathSandbox 给文案
       * 不存在 / 是目录 / 非 utf-8 / **OSError** (PermissionError 等)
@@ -115,10 +123,11 @@ def read_file(path: str, max_bytes: int | None = None) -> dict[str, Any]:
     Returns:
         ``dict[str, Any]``, LLM 工具契约字段:
             * ``ok`` (bool): True 表示读取成功
-            * 成功时附加 ``path`` / ``size`` / ``content`` / ``truncated``
-              (str / int / str / bool) — ``size`` 是返回内容字符数
-              (ASCII 文件下等于字节数); ``truncated`` 仅当 max_bytes
-              真生效且文件更长时为 True
+            * 成功时附加 ``path`` / ``size`` / ``original_size`` /
+              ``content`` / ``truncated`` (str / int / int / str / bool):
+              ``size`` 是返回内容字符数; ``original_size`` 是文件原始
+              字节数; ``truncated`` 仅当 max_bytes 真生效且文件更长
+              时为 True
             * 失败时附加 ``error`` (str): 含字段名 + 实际类型 / 错误类名
     """
     target, err = _resolve_inside(path)
@@ -137,11 +146,16 @@ def read_file(path: str, max_bytes: int | None = None) -> dict[str, Any]:
         # PermissionError / IsADirectoryError (race) / 等落到这里。
         # 之前直接上抛会破坏 "工具始终返回 dict" 的承诺 (test_fs_tools_oserror.py 锁)。
         return _fail(f"读取失败: {type(e).__name__}: {e}")
+    # 独立 stat 拿原始字节数; 截断路径下 _read_text_capped 内部已 stat 过一次,
+    # 多花一次 stat (μs 级) 换来 read_file 公开契约里 original_size 字段稳定
+    # 且 _read_text_capped 签名 2-tuple 不破——白盒测试 ``_read_text_capped`` 锁的就是 2-tuple。
+    original_size = target.stat().st_size
     rel = target.relative_to(get_settings().repo_root).as_posix()
     return {
         "ok": True,
         "path": rel,
         "size": len(content),
+        "original_size": original_size,
         "content": content,
         "truncated": truncated,
     }
