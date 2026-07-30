@@ -6,7 +6,9 @@
 > [ADR-0004](adr/0004-tool-count-and-memory-recall.md) /
 > [ADR-0005](adr/0005-architecture-v0-sync-watchdog-and-tool-rename.md)（v0.2.5 首次 sync，commit 4b390f19 被 revert） /
 > [ADR-0006](adr/0006-architecture-v0-resync-after-revert.md)（v0.2.5 重做） /
-> [ADR-0007](adr/0007-architecture-v0-tool-count-read-file-original-size.md)（v0.3 工具面 + read_file.original_size sync）。
+> [ADR-0007](adr/0007-architecture-v0-tool-count-read-file-original-size.md)（v0.3 工具面 + read_file.original_size sync） /
+> [ADR-0008](adr/0008-util-heartbeat-extraction.md)（v0.2.7 util/heartbeat.py 抽取，util/ 5→6） /
+> [ADR-0009](adr/0009-memory-5.8-lru-tracking.md)（v0.2.7 memory Fact.last_accessed_ts + touch_fact + recall_lru）。
 
 ## 一、五大核心
 
@@ -15,7 +17,7 @@
 | 梦想 | `AGENTS.md` + `core/dream.py` + `core/react_loop.py`（ReAct 主循环）+ `core/backend.py`（LLM 适配） |
 | 父母 | `hitl/gate.py` + `http_server.py` |
 | 生活 | `tools/blacklist.py`（仓库根路径围栏 + 黑名单） |
-| 记忆 | `memory/manager.py` + `core/turn.py` + `snapshot/side_git.py`（v0.2+ 含 cleanup 入口，见 ADR-0003） |
+| 记忆 | `memory/manager.py`（v0.2.7 含 LRU 追踪：`Fact.last_accessed_ts` + `touch_fact` + `recall_lru`，见 ADR-0009）+ `core/turn.py` + `snapshot/side_git.py`（v0.2+ 含 cleanup 入口，见 ADR-0003） |
 | 成长 | `evolve/metamorphosis.py` + `evolve/generations.py` + `autonomous.py`（自驱动循环）<br>+ `watchdog/supervisor.py`（子进程异常自愈）+ `watchdog/runtime_state.py`（心跳文件，见 ADR-0005/0006） |
 
 补充说明：
@@ -28,8 +30,9 @@
   守护窗口由 `settings.heartbeat_timeout_s` 控制（当前 60s），并非"24h"那种长周期。
   `runtime_state.json` 路径在 `tools/blacklist.py` 黑名单里，Agent 不可改、自愈路径不被 Agent 干扰。
 - **util/** 是按"出现 2+ 次且 ≥5 行"原则抽出的共享小工具，避免过早抽象。
-  当前 5 个模块：`json_utils` / `jsonl_utils` / `subprocess_utils` / `diary_archive` / `git_helpers`
-  （见 ADR-0001 D1，diary_archive + git_helpers 为 v0.1.1 后续增量）。
+  当前 6 个模块：`json_utils` / `jsonl_utils` / `subprocess_utils` / `diary_archive` /
+  `git_helpers` / `heartbeat`（v0.2.7 从 main.py 抽重复心跳线程模式，见 ADR-0008；
+  `diary_archive` + `git_helpers` 为 v0.1.1 后续增量）。
 - **压缩策略**：`compression/hook.py` 是策略注册表，`compression/simple.py` 是默认实现；
   `react_loop.py` 在每轮 ReAct 已调用 `memory.compress_if_needed(...)`（详见 ADR-0002 D3）。
 
@@ -48,7 +51,9 @@ src/xragent/
 ├── core/turn.py               # TurnRecord + TraceRecorder
 ├── core/react_loop.py         # ReAct 主循环（含 compress_if_needed 调用）
 ├── memory/manager.py          # MemoryManager：SQLite 长期事实 + compress_if_needed 封装
-├── compression/simple.py      # 最简压缩（SimpleCompression.compress）
+│                             # v0.2.7 加 Fact.last_accessed_ts / idx_facts_last_accessed_ts /
+│                             # touch_fact / recall_lru（LRU 追踪，见 ADR-0009）
+├── compression/simple.py      # 最简压缩（SimpleCompression.compress，deque(maxlen) O(1) 头插）
 ├── compression/hook.py        # 压缩策略注册表（已注册 simple）
 ├── snapshot/side_git.py       # 每个 turn snapshot
 │                             # v0.2.3 新增 cleanup_old_snapshots()，见 ADR-0003
@@ -73,8 +78,8 @@ src/xragent/
 ├── tools/diary_tools.py       # diary_write
 ├── tools/git_tools.py         # git_commit / git_push / snapshot_cleanup（medium，见 ADR-0007）
 ├── tools/evolve_tools.py      # propose_self_replace / terminate（高危，HITL 门控）
-├── util/                      # 5 个模块：json_utils / jsonl_utils / subprocess_utils
-│                             #          / diary_archive / git_helpers
+├── util/                      # 6 个模块：json_utils / jsonl_utils / subprocess_utils
+│                             #          / diary_archive / git_helpers / heartbeat
 └── llm/                       # 占位包，目前仅 __init__.py
 ```
 
@@ -127,6 +132,8 @@ src/xragent/
 | Push 节流 | `push_interval_minutes=30`（autonomous 模式每 30 min 批量 push 一次） |
 | 子进程异常可自愈 | `watchdog/supervisor.py` 定期读 `runtime_state.json` heartbeat，超过 `heartbeat_timeout_s` 未更新则判僵死、SIGTERM 后 fork 新子进程并 `bump_restart()`；累计 `restart_max_failures` 次失败后停。`runtime_state.json` 在 `write_blacklist` 里，Agent 不可改、自愈路径不被 Agent 干扰（见 ADR-0005 / ADR-0006） |
 | read_file 契约演进 | `tools/fs_tools.py::read_file` v0.3+ 多返回 `original_size` 字段（截断场景下与 `size` 不同，让父母看到真实大小），见 ADR-0007 |
+| 心跳线程抽象 | v0.2.7 起 `main.py` 两处重复心跳线程统一调 `util/heartbeat.start_heartbeat_thread(stop_predicate, interval_s, name)`，避免再抄出第三份变体；daemon=True（见 ADR-0008） |
+| 记忆 LRU 可观测 | v0.2.7 起 `MemoryManager` 暴露 `recall_lru(k)` 与 `touch_fact(fact_id)`，配合 `Fact.last_accessed_ts` 索引 `idx_facts_last_accessed_ts`，让冷数据回收 / 召回统计可量化（见 ADR-0009） |
 
 ## 五、版本对照
 
@@ -140,4 +147,5 @@ src/xragent/
 | v0.2.4 | 工具清单 14 → 15（补 memory_recall） | ADR-0004 |
 | v0.2.5 | 架构 doc 同步：watchdog/ 入表 + tools/ 重命名 4 文件 + 风险档位 medium + 自愈不变量（首次 ADR-0005 commit 4b390f19 被 revert，本轮 ADR-0006 重做） | ADR-0005 / ADR-0006（本文档） |
 | v0.2.6 | 架构 doc 同步：工具面 15 → 17（+snapshot_cleanup +memory_recall_by_tag）+ read_file.original_size + memory_tools 注释 4→5 | ADR-0007 |
+| v0.2.7 | util/heartbeat.py 抽取（util/ 5→6）+ memory 5.8 LRU 追踪（Fact.last_accessed_ts + touch_fact + recall_lru） | ADR-0008 / ADR-0009（本文档） |
 | v0.3 (planned) | 长期记忆强化（recall 工具全量上线 ✅；待办：摘要压缩 hook 强化） | 待定 |
