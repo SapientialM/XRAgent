@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 from ..core.backend import ToolSpec
 from . import web_search  # curl_url + web_search tools
@@ -15,6 +15,49 @@ class ToolDef:
     input_schema: dict[str, Any]
     risk: str
     handler: Callable[..., dict[str, Any]]
+
+
+class _HitlRejected:
+    """HITL 拒绝的轻量哨兵：避免把 rejection 走 handler 异常分支。"""
+
+    __slots__ = ("reason",)
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+
+class _HitlOutcome(NamedTuple):
+    """`_apply_hitl` 的返回：args（可能被 EDIT 改过）、approved 旗标、可选 rejection 哨兵。"""
+
+    args: dict[str, Any]
+    approved: bool
+    rejected: _HitlRejected | None  # 非 None 表示调用方应直接返回 blocked envelope
+
+
+def _call_gate(gate: Any, req: Any) -> Any:
+    """兼容 callable gate 与有 .request() 方法的 gate 对象（如 HitlGate）。"""
+    request = getattr(gate, "request", None)
+    if callable(request):
+        return request(req)
+    return gate(req)
+
+
+def _apply_hitl(name: str, td: ToolDef, args: dict[str, Any], gate: Any) -> _HitlOutcome:
+    """低风险 / gate=None 时直通；高风险走审批，根据 Decision 返回编辑后的 args + 旗标。"""
+    if td.risk != "high" or gate is None:
+        return _HitlOutcome(args=args, approved=False, rejected=None)
+
+    from ..hitl.gate import ApprovalRequest, ApprovalResult, Decision  # lazy import
+    req = ApprovalRequest(
+        tool_name=name, tool_args=args, risk=td.risk,
+        summary=f"{name}({list(args.keys())})", tool_call_id=name,
+    )
+    res = _call_gate(gate, req)
+    if res.decision == Decision.REJECT:
+        return _HitlOutcome(args=args, approved=False, rejected=_HitlRejected(res.reason))
+    if res.decision == Decision.EDIT and res.edited_args:
+        args = res.edited_args
+    return _HitlOutcome(args=args, approved=True, rejected=None)
 
 
 class ToolRegistry:
@@ -45,23 +88,14 @@ class ToolRegistry:
 
     def run(self, name: str, args: dict[str, Any], gate=None) -> dict[str, Any]:
         td = self.get(name)
-        req = None
-        if td.risk == "high" and gate is not None:
-            from ..hitl.gate import ApprovalRequest, ApprovalResult, Decision
-            req = ApprovalRequest(
-                tool_name=name, tool_args=args, risk=td.risk,
-                summary=f"{name}({list(args.keys())})", tool_call_id=name,
-            )
-            res = gate.request(req)
-            if res.decision == Decision.REJECT:
-                return {"ok": False, "blocked_by": "hitl", "reason": res.reason}
-            if res.decision == Decision.EDIT and res.edited_args:
-                args = res.edited_args
+        outcome = _apply_hitl(name, td, args, gate)
+        if outcome.rejected is not None:
+            return {"ok": False, "blocked_by": "hitl", "reason": outcome.rejected.reason}
         try:
-            out = td.handler(**args)
+            out = td.handler(**outcome.args)
         except Exception as e:
-            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
-        if req is not None:
+            out = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        if outcome.approved:
             out = {"ok": out.get("ok", True), **out, "hitl_approved": True}
         return out
 
