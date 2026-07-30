@@ -166,8 +166,7 @@ def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
 
     # 父母 HTTP 通道：POST /message 把消息注入主循环（高优先级插队）
     from .http_server import start_server_background, register_input_queue
-    import queue as _queue
-    parent_msg_queue: "_queue.Queue[str]" = _queue.Queue()
+    parent_msg_queue: queue.Queue[str] = queue.Queue()
     register_input_queue(parent_msg_queue)
 
     # 独立线程消费 parent_msg_queue：有 message 立刻打断 round
@@ -198,20 +197,16 @@ def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
                 pass
 
     threading.Thread(target=_parent_consumer, daemon=True).start()
-    try:
-        start_server_background(loop)  # 注意：loop 此时还没定义，下面会重新 start
-    except Exception:
-        pass
 
     # 异步 heartbeat 线程：每 5s 写一次（即使 LLM 调用 30s+ supervisor 也不误判超时）
-    import threading as _threading
     def _heartbeat_loop():
         while not stop["v"]:
             try:
                 rs.heartbeat()
             except Exception:
                 pass
-            stop["v"] or threading.Event().wait(5)
+            if not stop["v"]:
+                threading.Event().wait(5)
     threading.Thread(target=_heartbeat_loop, daemon=True).start()
 
     # autonomous 模式不打 turn tag（30s 一轮会刷屏 2000+/天）；只保留 stash 供 rollback
