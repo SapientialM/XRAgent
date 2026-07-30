@@ -155,3 +155,46 @@ def test_schema_v51_migration_idempotent(repo_root):
     idx = [r[1] for r in m1._conn.execute("PRAGMA index_list(facts)").fetchall()]
     assert "idx_facts_source_turn_idx" in idx
     m1.close()
+
+
+# === 5.2 新方法测试 ===
+
+def test_delete_by_turn_idx_removes_matching_rows(repo_root):
+    """5.2: delete_by_turn_idx 删除该 turn 的全部 fact 并返回删除条数。"""
+    m = MemoryManager()
+    m.save_fact("note", "t5 A", source_turn="t5", source_turn_idx=5)
+    m.save_fact("note", "t5 B", source_turn="t5", source_turn_idx=5)
+    m.save_fact("note", "t6 keep", source_turn="t6", source_turn_idx=6)
+
+    deleted = m.delete_by_turn_idx(5)
+    assert deleted == 2
+
+    # t5 已删空; t6 保留
+    assert m.recall_by_turn_idx(5) == []
+    survivors = m.recall_by_turn_idx(6)
+    assert len(survivors) == 1
+    assert survivors[0].content == "t6 keep"
+
+
+def test_delete_by_turn_idx_missing_returns_zero(repo_root):
+    """5.2: 不存在的 turn_idx 不抛异常, 返回 0。"""
+    m = MemoryManager()
+    m.save_fact("note", "only t7", source_turn="t7", source_turn_idx=7)
+    # 不存在的 turn_idx
+    assert m.delete_by_turn_idx(404) == 0
+    # 现有数据未受影响
+    assert len(m.recall_by_turn_idx(7)) == 1
+
+
+def test_delete_by_turn_idx_skips_null_idx_rows(repo_root):
+    """5.2: 没填 source_turn_idx 的老行不应被误删 (NULL != ?)。"""
+    m = MemoryManager()
+    m.save_fact("note", "无 idx", source_turn="t?")  # source_turn_idx=None
+    m.save_fact("note", "有 idx", source_turn="t8", source_turn_idx=8)
+
+    deleted = m.delete_by_turn_idx(0)  # 0 不会匹配 NULL
+    assert deleted == 0
+
+    # 两条都还在
+    assert m.count() == 2
+    assert len(m.recall_by_turn_idx(8)) == 1

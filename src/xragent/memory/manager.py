@@ -55,6 +55,17 @@ class MemoryManager:
     # 兼容旧引用 (任何外部代码读 SCHEMA 仍可拿到完整脚本)
     SCHEMA = BASE_SCHEMA + INDEX_SCHEMA
 
+    # === Schema 版本: 5.1 → 5.2 ===
+    # 变更:
+    #   1. 新增方法 delete_by_turn_idx(turn_idx) -> int
+    # 用途:
+    #   - 配合 snapshot 回滚: "撤销第 N 轮" 时把该 turn 写入的 fact 一起清掉,
+    #     避免下次 recall 又召回已撤销的事实
+    # 兼容性:
+    #   - schema 0 改动 (不需 migration)
+    #   - 走 idx_facts_source_turn_idx 索引 O(log n) (5.1 已建, 复用)
+    #   - 新方法对老调用方零影响 (新增, 不替换任何现有方法)
+
     # Schema notes:
     # 1. (category, ts DESC) composite index covers recall()'s two main patterns:
     #      WHERE category = ? ORDER BY ts DESC LIMIT ?
@@ -67,6 +78,7 @@ class MemoryManager:
     #    populated on every save_fact() and the index is cheap; it removes
     #    a full scan if that pattern emerges.
     # 4. (source_turn_idx) index: 新增, 与 #3 对偶, 走整数 turn 索引。
+    #    5.2 起还支撑 delete_by_turn_idx() 的 O(log n) 删除。
     # 5. Old single-column idx_facts_category is a prefix of the composite and is
     #    therefore redundant; existing DBs may still carry it (harmless).
 
@@ -242,6 +254,27 @@ class MemoryManager:
             (turn_idx, k),
         ).fetchall()
         return [self._row_to_fact(r) for r in rows]
+
+    def delete_by_turn_idx(self, turn_idx: int) -> int:
+        """按 turn 整数索引删除 fact。5.2 新方法。
+
+        配合 snapshot 回滚场景: 撤销某 turn 时把它的全部 fact 视为副作用一并清除,
+        避免下次 recall 又召回已撤销的事实。走 idx_facts_source_turn_idx 索引 (5.1
+        已建) 做 O(log n) 删除。
+
+        不存在的 turn_idx 走索引扫描后无匹配, 返回 0 (非异常, 非 None)。
+
+        Args:
+            turn_idx: turn 的整数索引, 同 :meth:`save_fact` 的 ``source_turn_idx``。
+
+        Returns:
+            被删除的行数。0 表示该 turn_idx 无 fact 或已被删干净。
+        """
+        cur = self._conn.execute(
+            "DELETE FROM facts WHERE source_turn_idx = ?", (turn_idx,)
+        )
+        self._conn.commit()
+        return cur.rowcount
 
     def recent(self, n: int = 20) -> list[Fact]:
         rows = self._conn.execute(
