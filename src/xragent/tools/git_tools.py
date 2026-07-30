@@ -13,12 +13,6 @@
     裸本地仓库里几乎不可能超时;真要卡也由 ``SideGit`` 内的 ``RuntimeError``
     抛出后被 ``registry`` 的兜底 ``except Exception`` 转成 ``ok=False``,
     与现有契约一致。
-
-**v0.5.5 dedup**:
-  - ``_fail`` 与 fs_tools / diary_tools / exec_tools 同形,抽到
-    ``src/xragent/util/result.py``。本模块用 ``msg`` 字段
-    (``git_push`` 契约固定 ``{"ok": bool, "msg": str}``,test_git_tools.py
-    锁死),所以 re-export 时选 ``fail_msg`` 而不是 ``fail_error``。
 """
 from __future__ import annotations
 
@@ -26,16 +20,21 @@ import subprocess
 from typing import Any
 
 from ..snapshot.side_git import SideGit
-from ..util.result import fail_msg as _fail
 
 
 # === 常量：与 exec_tools 对齐，便于两处工具 timeout 行为一致 ===
 DEFAULT_PUSH_TIMEOUT_S: int = 30
 
 
-# === _fail 字典工厂已抽到 src/xragent/util/result.py::fail_msg
-# (test_git_tools_timeout.py::test_fail_msg_is_positional_only 锁死 msg 字段 +
-#  positional-only 语义) ===
+def _fail(msg: str, /, **extras: Any) -> dict[str, Any]:
+    """``ok=False`` 字典工厂。``msg`` 是 positional-only 必填;
+
+    ``**extras`` 显式传入才出现,默认空。LLM 工具契约要求最小键集,
+    不要随便往 extras 里塞字段。
+    """
+    out: dict[str, Any] = {"ok": False, "msg": msg}
+    out.update(extras)
+    return out
 
 
 def _resolve_timeout(value: object, *, default: int) -> int:
