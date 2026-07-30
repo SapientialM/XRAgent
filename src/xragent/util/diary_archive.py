@@ -42,6 +42,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 from pathlib import Path
+from typing import Any
 
 # 严格匹配 daily 文件名 `YYYY-MM-DD.md`;search-log.md / turns/ 等不动。
 _DAILY_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})\.md$")
@@ -146,7 +147,7 @@ def _unlink_files(paths: list[Path]) -> str | None:
     return None
 
 
-def archive_week(diary_dir: Path, iso_year: int, iso_week: int) -> dict:
+def archive_week(diary_dir: Path, iso_year: int, iso_week: int) -> dict[str, Any]:
     """把指定 ISO 周的所有 daily 文件合并到 archive/{year}-W{week:02d}.md。
 
     合并语义: 若 archive 文件已存在,新内容追加在末尾;若不存在,新建。
@@ -246,7 +247,7 @@ def archive_week(diary_dir: Path, iso_year: int, iso_week: int) -> dict:
     }
 
 
-def auto_archive(diary_dir: Path, weeks_threshold: int = 2) -> dict:
+def auto_archive(diary_dir: Path, weeks_threshold: int = 2) -> dict[str, Any]:
     """按 mtime 自动归档 N 周阈值外的所有 daily 文件。
 
     weeks_threshold=2 (默认): 保留今天所在周、上周、上上周;更早的完整周全部归档。
@@ -289,8 +290,8 @@ def auto_archive(diary_dir: Path, weeks_threshold: int = 2) -> dict:
 
     today = dt.date.today()
     seen_weeks: set[tuple[int, int]] = set()
-    archived: list[dict] = []
-    skipped: list[dict] = []
+    archived: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
 
     for entry in sorted(diary_dir.iterdir()):
         if not entry.is_file():
