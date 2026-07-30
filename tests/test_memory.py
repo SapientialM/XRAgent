@@ -294,3 +294,112 @@ def test_schema_v53_migration_idempotent(repo_root):
     idx = [r[1] for r in m1._conn.execute("PRAGMA index_list(facts)").fetchall()]
     assert "idx_facts_category_priority_ts" in idx
     m1.close()
+
+# === 5.5 新方法 + 新字段测试 ===
+
+def test_archived_field_default_false(repo_root):
+    """5.5: Fact.archived 默认 False (新行可见)."""
+    m = MemoryManager()
+    f = m.save_fact("note", "默认 archived")
+    assert f.archived is False
+    # 落库后 recall 出来也应一致
+    hits = m.recall("默认 archived")
+    assert hits and hits[0].archived is False
+
+
+def test_archive_fact_marks_row(repo_root):
+    """5.5: archive_fact(id) 标 archived=1, 返回 True."""
+    m = MemoryManager()
+    f = m.save_fact("note", "待归档 fact")
+    assert m.archive_fact(f.id) is True
+    # recall 仍能召回 (兼容: 老方法不过滤 archived)
+    hits = m.recall("待归档")
+    assert hits and hits[0].archived is True
+
+
+def test_archive_fact_is_idempotent_and_safe(repo_root):
+    """5.5: 重复 archive 返回 False; 不存在的 id 返回 False; 不抛."""
+    m = MemoryManager()
+    f = m.save_fact("note", "once")
+    # 第一次 archive → True
+    assert m.archive_fact(f.id) is True
+    # 第二次 archive → False (幂等)
+    assert m.archive_fact(f.id) is False
+    # 不存在的 id → False
+    assert m.archive_fact(999999) is False
+
+
+def test_unarchive_fact_restores_row(repo_root):
+    """5.5: unarchive_fact 把 archived=1 恢复为 0."""
+    m = MemoryManager()
+    f = m.save_fact("note", "归档再恢复")
+    m.archive_fact(f.id)
+    assert m.unarchive_fact(f.id) is True
+    # 重复 unarchive → False (幂等)
+    assert m.unarchive_fact(f.id) is False
+
+
+def test_recall_active_excludes_archived(repo_root):
+    """5.5: recall_active 默认排除 archived=1 行."""
+    m = MemoryManager()
+    keep = m.save_fact("note", "active fact")
+    gone = m.save_fact("note", "archived fact")
+    m.archive_fact(gone.id)
+
+    hits = m.recall_active(k=10)
+    contents = {h.content for h in hits}
+    assert "active fact" in contents
+    assert "archived fact" not in contents
+    # keep 行仍 archived=False
+    keep_hit = [h for h in hits if h.id == keep.id][0]
+    assert keep_hit.archived is False
+    # gone 行不在结果里 (无法直接断言, 但已通过 contents 集合验证)
+
+
+def test_recall_active_with_query_and_category(repo_root):
+    """5.5: recall_active 支持 query + category 过滤."""
+    m = MemoryManager()
+    m.save_fact("preference", "user 喜欢 Python")
+    m.save_fact("history", "user 写过 C++")
+    pref_archived = m.save_fact("preference", "user 喜欢 Rust")
+    m.archive_fact(pref_archived.id)
+
+    # category + query 协同过滤
+    hits = m.recall_active(query="user", k=10, category="preference")
+    contents = {h.content for h in hits}
+    assert "user 喜欢 Python" in contents
+    assert "user 喜欢 Rust" not in contents  # archived
+    assert all(h.category == "preference" for h in hits)
+
+
+def test_count_active_skips_archived(repo_root):
+    """5.5: count_active 只算 archived=0 行; count() 仍算全部."""
+    m = MemoryManager()
+    n0 = m.count()
+    n0a = m.count_active()
+    a = m.save_fact("note", "A")
+    b = m.save_fact("note", "B")
+    assert m.count() == n0 + 2
+    assert m.count_active() == n0a + 2
+    m.archive_fact(a.id)
+    assert m.count() == n0 + 2         # 不变 (软删不丢行)
+    assert m.count_active() == n0a + 1 # 只剩 B
+
+
+def test_schema_v55_migration_idempotent(repo_root):
+    """5.5 migration: 反复 init 不应破坏, archived 列不会被重复加."""
+    m1 = MemoryManager()
+    cols1 = [r[1] for r in m1._conn.execute("PRAGMA table_info(facts)").fetchall()]
+    assert "archived" in cols1
+
+    # 第二次调用不应抛, 也不应再加列
+    m1._migrate_v55()
+    cols2 = [r[1] for r in m1._conn.execute("PRAGMA table_info(facts)").fetchall()]
+    assert cols2.count("archived") == 1
+
+    # partial index 存在 (sqlite_master 查)
+    idx_rows = m1._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_facts_active'"
+    ).fetchall()
+    assert idx_rows and idx_rows[0][0] == "idx_facts_active"
+    m1.close()
