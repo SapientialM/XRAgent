@@ -123,3 +123,35 @@ def test_cleanup_old_snapshots_not_a_repo_is_noop(repo_root):
     assert sg.is_repo() is False
     assert sg.cleanup_old_snapshots(max_age_days=30) == []
     assert sg.cleanup_old_snapshots(max_age_days=30, dry_run=True) == []
+
+
+def test_cleanup_old_snapshots_ignores_non_xragent_tags(repo_root):
+    """非 ``xragent/turn-*`` 前缀的 tag 不应被误删。
+
+    用户手工打的 ``v0.1`` / ``baseline`` 等里程碑 tag 必须保留——cleanup
+    只动 ``xragent/turn-*`` 自动前缀。这是 watch-through 边角契约：refspec
+    ``refs/tags/xragent/turn-*`` 自然只匹配自动前缀,但仍需白盒锁行为。
+    """
+    sg = SideGit()
+    sg.ensure_repo()
+
+    now = int(time.time())
+    old_ts = now - 60 * 86400  # 全部都在 30 天阈值外
+    _make_annotated_tag(str(repo_root), "v0.1", "user milestone", old_ts)
+    _make_annotated_tag(str(repo_root), "baseline", "user tag", old_ts)
+    _make_annotated_tag(str(repo_root), "xragent/turn-stale", "auto", old_ts)
+
+    removed = sg.cleanup_old_snapshots(max_age_days=30)
+    # 只删自动前缀的快照
+    assert removed == ["xragent/turn-stale"]
+
+    # user 手工 tag 仍在（直接 git tag -l 验证,不只信 list_snapshots）
+    all_tags = subprocess.run(
+        ["git", "tag", "-l"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert "v0.1" in all_tags
+    assert "baseline" in all_tags
+    assert "xragent/turn-stale" not in all_tags

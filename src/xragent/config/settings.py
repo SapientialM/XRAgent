@@ -95,6 +95,11 @@ class Settings(BaseSettings):
         ".gitignore",
     )
 
+    # === SideGit snapshot 清理阈值（cleanup_old_snapshots 用）===
+    # 0 / 负数 = 禁用清理；默认保留 30 天内的 xragent/turn-* tag。
+    # 用户手工打的 v0.1 / baseline 等里程碑 tag 不在此列,只清理自动前缀。
+    snapshot_retention_days: int = 30
+
     # === derivation ===
     @property
     def active_api_key(self) -> str:

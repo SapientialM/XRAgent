@@ -22,10 +22,17 @@
     看到无改动而 no-op, committed_head 永远为 None。
   - 修法: 先 commit (有改动就 commit), 再 snapshot (stash backup + tag)。最终 Snapshot
     同时携带 tag (来自 snapshot) 和 committed_head (来自 commit)。
+
+**v0.2.3 新方法**:
+  - `cleanup_old_snapshots(max_age_days=None, dry_run=False)`: 清理 N 天前的
+    ``xragent/turn-*`` 自动 snapshot tag。默认保留天数走 settings.snapshot_retention_days。
+    非 git 仓库 / ``max_age_days <= 0`` 静默返回 ``[]``；``dry_run=True`` 仅列候选。
+    仅匹配 ``xragent/turn-*`` 前缀,用户手工 tag（如 ``v0.1`` / ``baseline``）不会被误删。
 """
 from __future__ import annotations
 
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -233,6 +240,75 @@ class SideGit:
             note=snap.note,
             committed_head=head,
         )
+
+    def cleanup_old_snapshots(
+        self,
+        max_age_days: int | None = None,
+        dry_run: bool = False,
+    ) -> list[str]:
+        """清理 N 天前的 ``xragent/turn-*`` snapshot tag。
+
+        默认保留天数走 :attr:`Settings.snapshot_retention_days`（默认 30）。
+        ``max_age_days <= 0`` 表示禁用清理 → 直接返回 ``[]``，便于 watchdog
+        / cron 调用时用单一开关关闭。``dry_run=True`` 时仅列候选不删除。
+
+        非 git 仓库时静默返回 ``[]``，不抛异常。仅匹配 ``xragent/turn-*``
+        前缀——用户手工打的 ``v0.1`` / ``baseline`` 等里程碑 tag 不会被误删。
+
+        Args:
+            max_age_days: 保留天数；``None`` 走 settings；``<= 0`` 禁用。
+            dry_run: True 仅返回候选 tag 列表，不实际 ``git tag -d``。
+
+        Returns:
+            被删除（或将被删除）的 tag 名列表，按 creatordate 从旧到新排序。
+
+        Side effects:
+            dry_run=False 时对每个候选 tag 执行 ``git tag -d``；单条失败
+            不阻塞其他 tag，返回值只列出成功删除的。
+        """
+        if not self.is_repo():
+            return []
+        if max_age_days is None:
+            max_age_days = self.settings.snapshot_retention_days
+        if max_age_days <= 0:
+            return []
+
+        cutoff = int(time.time()) - max_age_days * 86400
+        try:
+            out = self._run(
+                "for-each-ref",
+                "refs/tags/xragent/turn-*",
+                "--format=%(refname:short)%09%(creatordate:unix)",
+            )
+        except RuntimeError:
+            return []
+
+        candidates: list[tuple[int, str]] = []
+        for line in out.splitlines():
+            if "\t" not in line:
+                continue
+            name, ts_str = line.split("\t", 1)
+            try:
+                ts = int(ts_str)
+            except ValueError:
+                continue
+            if ts < cutoff:
+                candidates.append((ts, name))
+
+        candidates.sort()  # 旧 → 新
+        targets = [name for _, name in candidates]
+        if dry_run or not targets:
+            return targets
+
+        removed: list[str] = []
+        for name in targets:
+            try:
+                self._run("tag", "-d", name)
+                removed.append(name)
+            except RuntimeError:
+                # 单个 tag 删不掉不应阻塞整体；吞掉并继续。
+                pass
+        return removed
 
     def push(self, remote: str = "origin", branch: str = "main") -> tuple[bool, str]:
         result = subprocess.run(
