@@ -33,7 +33,6 @@ PR review 时噪声大。归档按 ISO 周合并到 `diary/archive/YYYY-Wxx.md`�
 from __future__ import annotations
 
 import datetime as dt
-import os
 import re
 from pathlib import Path
 
@@ -57,7 +56,7 @@ def _week_bounds(iso_year: int, iso_week: int) -> tuple[dt.date, dt.date]:
     return monday, sunday
 
 
-def _is_in_or_after_threshold(today: dt.date, file_monday: dt.date, weeks_threshold: int) -> bool:
+def _within_weeks_threshold(today: dt.date, file_monday: dt.date, weeks_threshold: int) -> bool:
     """判断 file_monday 是否位于"今天所在周的 N 周阈值内"(含)。
 
     weeks_threshold=2 时：今天所在周、上周、上上周都保留;更早的周会被归档。
@@ -79,6 +78,16 @@ def parse_daily_filename(path: Path) -> dt.date | None:
         return None
 
 
+def _unlink_files(paths: list[Path]) -> str | None:
+    """逐个 unlink；任一失败则返回 "删除原文件失败 {name}: {err}"；全部成功返回 None。"""
+    for path in paths:
+        try:
+            path.unlink()
+        except OSError as e:
+            return f"删除原文件失败 {path.name}: {e}"
+    return None
+
+
 def archive_week(diary_dir: Path, iso_year: int, iso_week: int) -> dict:
     """把指定 ISO 周的所有 daily 文件合并到 archive/{year}-W{week:02d}.md。
 
@@ -98,15 +107,11 @@ def archive_week(diary_dir: Path, iso_year: int, iso_week: int) -> dict:
 
     monday, sunday = _week_bounds(iso_year, iso_week)
     # 在目录里找这一周内的 daily 文件(周一到周日,含两端)
-    in_week: list[tuple[dt.date, Path]] = []
-    for entry in sorted(diary_dir.iterdir()):
-        if not entry.is_file():
-            continue
-        d = parse_daily_filename(entry)
-        if d is None:
-            continue
-        if monday <= d <= sunday:
-            in_week.append((d, entry))
+    in_week: list[tuple[dt.date, Path]] = [
+        (d, entry)
+        for entry in sorted(diary_dir.iterdir())
+        if entry.is_file() and (d := parse_daily_filename(entry)) is not None and monday <= d <= sunday
+    ]
 
     if not in_week:
         return {
@@ -142,19 +147,16 @@ def archive_week(diary_dir: Path, iso_year: int, iso_week: int) -> dict:
     with archive_path.open("a", encoding="utf-8") as f:
         f.write("".join(new_block_parts))
 
-    # 删除原 daily 文件(已合并到 archive)。
-    for _, path in in_week:
-        try:
-            path.unlink()
-        except OSError as e:
-            # 单个文件删不掉不应阻塞其它;返回 ok=False + error 即可。
-            return {
-                "ok": False,
-                "error": f"删除原文件失败 {path.name}: {e}",
-                "archive_path": archive_path.relative_to(diary_dir).as_posix(),
-                "moved_files": moved_files,
-                "appended_sections": appended_sections,
-            }
+    # 删除原 daily 文件(已合并到 archive);helper 抽掉重复 try/except 块。
+    err = _unlink_files([p for _, p in in_week])
+    if err is not None:
+        return {
+            "ok": False,
+            "error": err,
+            "archive_path": archive_path.relative_to(diary_dir).as_posix(),
+            "moved_files": moved_files,
+            "appended_sections": appended_sections,
+        }
 
     return {
         "ok": True,
@@ -200,28 +202,28 @@ def auto_archive(diary_dir: Path, weeks_threshold: int = 2) -> dict:
             continue
 
         try:
-            iso = mtime.isocalendar()
+            iso_year, iso_week, _ = mtime.isocalendar()
         except Exception:  # pragma: no cover - 极少触发
             skipped.append({"file": entry.name, "reason": "no_iso_week"})
             continue
 
         file_monday = mtime - dt.timedelta(days=mtime.weekday())
-        if _is_in_or_after_threshold(today, file_monday, weeks_threshold):
+        if _within_weeks_threshold(today, file_monday, weeks_threshold):
             skipped.append({"file": entry.name, "reason": "in_threshold"})
             continue
 
-        key = (iso[0], iso[1])
+        key = (iso_year, iso_week)
         if key in seen_weeks:
             # 同周已归档过(可能上一轮已处理过,或文件按 ISO 周撞了)
             continue
         seen_weeks.add(key)
 
-        r = archive_week(diary_dir, iso[0], iso[1])
+        r = archive_week(diary_dir, iso_year, iso_week)
         if r.get("ok"):
             archived.append(
                 {
-                    "iso_year": iso[0],
-                    "iso_week": iso[1],
+                    "iso_year": iso_year,
+                    "iso_week": iso_week,
                     "archive_path": r.get("archive_path", ""),
                     "moved_files": r.get("moved_files", []),
                 }
