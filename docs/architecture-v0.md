@@ -1,7 +1,7 @@
 # XRAgent 架构摘要（v0.1 出生版）
 
 > 完整方案在多次迭代中展开；此文档是 v0.1 出生时的快速地图。
-> 当代码与本文档冲突时：**代码为准**，并在 `docs/adr/` 记录决策。详见 [ADR-0002](adr/0002-architecture-v0-sync.md) / [ADR-0003](adr/0003-snapshot-retention-v0.2.3.md)。
+> 当代码与本文档冲突时：**代码为准**，并在 `docs/adr/` 记录决策。详见 [ADR-0002](adr/0002-architecture-v0-sync.md) / [ADR-0003](adr/0003-snapshot-retention-v0.2.3.md) / [ADR-0004](adr/0004-tool-count-and-memory-recall.md)。
 
 ## 一、五大核心
 
@@ -28,7 +28,8 @@
 
 ```
 src/xragent/
-├── config/settings.py         # pydantic-settings（v0.2.3 + snapshot_retention_days，见 ADR-0003 D3）
+├── config/settings.py         # pydantic-settings（v0.2.3 + snapshot_retention_days，见 ADR-0003 D3；
+│                             #           + cmd_blacklist_patterns、push_interval_minutes，v0.2.3 后增量）
 ├── core/dream.py              # AGENTS.md 加载
 ├── core/backend.py            # BackendProtocol + Mock + LangChain
 ├── core/turn.py               # TurnRecord + TraceRecorder
@@ -37,106 +38,75 @@ src/xragent/
 ├── compression/simple.py      # 最简压缩（SimpleCompression.compress）
 ├── compression/hook.py        # 压缩策略注册表（已注册 simple）
 ├── snapshot/side_git.py       # 每个 turn snapshot
-│                             # v0.2.3 新增 cleanup_old_snapshots(max_age_days, dry_run)（见 ADR-0003 D1/D4）
-├── hitl/gate.py               # 三态决策
-├── tools/blacklist.py         # PathSandbox + binary 黑名单
-├── tools/registry.py          # 14 工具注册（见下）
-├── tools/fs_tools.py
-├── tools/exec_tools.py
-├── tools/git_tools.py
-├── tools/memory_tools.py
-├── tools/diary_tools.py
-├── tools/evolve_tools.py
-├── tools/web_search.py        # curl_url + web_search（DuckDuckGo）
-├── evolve/generations.py      # 世代谱
-├── evolve/metamorphosis.py    # 金蝉脱壳
-├── autonomous.py              # 自驱动循环 + 8 个 task templates
-├── llm/                       # 多 provider 适配 stub（v0.2 落地，目前仅 __init__.py）
-├── util/                      # 共享小工具（5 模块，详见 §一）
-├── watchdog/runtime_state.py
-├── watchdog/supervisor.py     # 24h 守护
-├── http_server.py             # 父母通道（/health /message /last-answer /approve）
-└── main.py                    # CLI 入口
-                              # --smoke / --once / --serve / --as-supervised
-                              # --autonomous [--interval N --max-rounds N]
-                              # --freeze
+│                             # v0.2.3 新增 cleanup_old_snapshots()，见 ADR-0003
+├── evolve/metamorphosis.py    # 金蝉脱壳：编译新 main.py 并切换 entry
+├── evolve/generations.py      # generations.jsonl 留痕
+├── autonomous.py              # 定时巡检 + TASK_TEMPLATES（8 个）+ queue.jsonl
+├── hitl/gate.py               # HITL 门（高危动作 / 高危工具审批）
+├── http_server.py             # HTTP 父通道（补全 HIL 通道，见 ADR-0001 D2）
+├── tools/registry.py          # build_default_registry()：注册 15 个工具
+│                             # （v0.2.3 后 +1：memory_recall，见 ADR-0004）
+│                             # evolution_enabled=false 时剩 13 个（去 propose_self_replace + terminate）
+├── tools/blacklist.py         # 路径围栏 + 黑名单校验
+├── tools/memory_tools.py      # 4 个 memory_* 工具（save + 3 种 recall，见 ADR-0004）
+├── tools/file_tools.py        # read_file / list_dir / write_file / run_cmd
+├── tools/web_tools.py         # web_search / curl_url（带限流）
+├── tools/diary_tools.py       # diary_write
+├── tools/git_tools.py         # git_commit / git_push
+├── tools/evolution_tools.py   # propose_self_replace / terminate（高危，HITL 门控）
+├── util/                      # 5 个模块：json_utils / jsonl_utils / subprocess_utils
+│                             #          / diary_archive / git_helpers
+└── llm/                       # 占位包，目前仅 __init__.py
 ```
 
-工具总数：**14 个**（`build_default_registry()` 注册，详见 §三）。`evolution_enabled=false` 时
-`propose_self_replace` 与 `terminate` 会被 unregister，剩 12 个。
+工具总数：**15 个**（`evolution_enabled=false` 时剩 13 个；`propose_self_replace` + `terminate`
+属 evolution_tools，由 HITL 门控的 high-risk 工具）。
 
-## 三、注册工具（14）
+## 三、注册工具（15）
 
-| 工具 | 风险 | HITL | 备注 |
+来源：`src/xragent/tools/registry.py::build_default_registry()`
+
+| 工具 | 风险 | HITL | 用途 |
 | --- | --- | --- | --- |
-| read_file | low | — | 仓库根路径围栏 |
-| list_dir | low | — | 仓库根路径围栏 |
-| write_file | high | ✓ | 路径围栏 + 黑名单 |
-| run_cmd | high | ✓ | 30s 超时 + binary 黑名单 |
-| git_commit | high | ✓ | ≥100 字节实质改动 |
-| git_push | high | ✓ | 网络失败返回错误 |
-| memory_save | low | — | SQLite facts.db |
-| memory_recall_range | low | — | 按 ts 窗口召回 |
-| memory_top_frequent | low | — | content 频次 top-N |
-| diary_write | low | — | 人类可读日记 |
-| propose_self_replace | high | ✓ | 金蝉脱壳 |
-| terminate | high | ✓ | 优雅退出 |
-| curl_url | medium | — | 自动留痕 search-log.md，敏感词拦截 |
-| web_search | medium | — | DuckDuckGo，无需 API key |
+| `read_file`     | low | 否 | 读仓库内文件 |
+| `list_dir`      | low | 否 | 列目录（不含 .git） |
+| `web_search`    | low | 否 | DuckDuckGo 搜索（top 5 URL） |
+| `curl_url`      | low | 否 | HTTP GET/POST（5min 限流 + diary 留痕） |
+| `diary_write`   | low | 否 | 写 diary/YYYY-MM-DD.md |
+| `memory_save`   | low | 否 | 存一条 fact 到长期记忆 |
+| `memory_recall`        | low | 否 | 关键词 LIKE 召回 fact（"我说过什么关于 X 的事"），v0.2.3 后新增，见 ADR-0004 |
+| `memory_recall_range`  | low | 否 | 按时间窗口召回 fact（"什么时候说的"） |
+| `memory_top_frequent`  | low | 否 | 频次 top-N（"反复说过的点是什么"） |
+| `write_file`    | high | 是 | 写文件（路径围栏 + 黑名单校验） |
+| `run_cmd`       | high | 是 | shell（30s 超时 + binary 黑名单 + pattern 黑名单） |
+| `git_commit`    | high | 是 | git add+commit |
+| `git_push`      | high | 是 | git push 到 origin |
+| `propose_self_replace` | high | 是 | 金蝉脱壳：commit → push → 编译 → supervisor 切换 |
+| `terminate`     | high | 是 | 优雅终止（supervisor 不再自动拉起） |
+
+> §四 关键不变量里 14 → 15 与 §三 一致：3 个 recall 工具平级，补齐 `memory_recall` 后才是
+> "3 种 recall 风格"（关键词 / 时间窗 / 频次），memory_tools.py 注释里也明说。
 
 ## 四、关键不变量
 
-1. **AGENTS.md 不可写**：黑名单 + tools/blacklist 强制
-2. **路径围栏**：`PathSandbox.assert_writable()` 强制 resolve 后在 repo_root 之下
-3. **二进制黑名单**：`assert_command_allowed()` 拒绝 curl/wget/ssh/nc 等
-4. **HITL 门**：高危工具（write_file / run_cmd / git_commit / git_push / propose_self_replace / terminate）走审批
-5. **同记忆**：facts.db + diary/turns/ + generations.jsonl 在仓库根，跨重启保留
-6. **SideGit 不动源代码**：snapshot 只 stash tracked changes（v0.1 修复后）
-7. **代码 / 文档单一真相源**：当代码与本文档冲突时以代码为准，差异在 `docs/adr/` 留痕
-8. **snapshot 保留天数可配**：`Settings.snapshot_retention_days`（默认 30）；≤0 禁用清理；仅匹配 `xragent/turn-*` 前缀（见 ADR-0003 D3/D4）
+| 不变量 | 实现位置 |
+| --- | --- |
+| AGENTS.md / .env / runtime_state.json / .git/ 不可改 | `tools/blacklist.py` 路径黑名单（`write_blacklist`） |
+| 危险 binary 不可用 | `config/settings.py::cmd_blacklist` + `cmd_blacklist_patterns`（v0.2.3 后增量） |
+| HIL 通道是父母 | `hitl/gate.py`（仅响应人类父母指令） |
+| 高危工具须审批 | `build_default_registry` 传 `evolution_enabled` 决定 evolution_tools 是否注册 |
+| Diary 是真相 | `diary/YYYY-MM-DD.md` 人类可读 + `diary/turns/*` 结构化日志（Agent 不可自我粉饰） |
+| 失败可回滚 | `snapshot/side_git.py` 每 turn tag + v0.2.3 后 `cleanup_old_snapshots` 自动清理过期 tag（见 ADR-0003） |
+| Push 节流 | `push_interval_minutes=30`（autonomous 模式每 30 min 批量 push 一次） |
 
-## 五、24h 自愈协议
+## 五、版本对照
 
-```
-supervisor (watchdog/supervisor.py)
-    ├── spawn child: python -m xragent.main --as-supervised
-    ├── 每 heartbeat_interval_s 检查 runtime_state.json::heartbeat_ts
-    ├── 超时（heartbeat_timeout_s）→ SIGTERM child → 重启
-    ├── child rc != 0 → 失败计数 +1 → 重启（间隔指数退避）
-    ├── restart_suppressed → 退出
-    └── restart_count >= restart_max_failures → 停机报警
-```
-
-## 六、HTTP 父母通道
-
-```
-GET  /health          → runtime_state (pid/heartbeat_ts/restart_count)
-POST /message {text}  → enqueue 到主循环 input_queue
-GET  /last-answer     → 返回最近一次 LLM answer
-POST /approve {id,...}→ 回复 HITL gate 一次（用于 HITL HTTP 通道）
-```
-
-## 七、演进路线
-
-- v0.1 (current，**实际已演化为 v0.2.3**；增量见 ADR-0003)：出生 — ReAct + **14 工具** + HITL + Side-Git + Dream + Diary + 蜕皮 + HTTP 父母 + 自驱动循环
-  + **压缩 hook 已接入**（react_loop 每轮调用 memory.compress_if_needed，v0.3 仅做强化而非启用）
-  + **snapshot 保留**：v0.2.3 新增 `cleanup_old_snapshots()` + `Settings.snapshot_retention_days`
-- v0.2：多 LLM provider 适配（OpenAI / DeepSeek / GLM / Mock；`llm/` 包已留空 stub）
-- v0.3：长期记忆强化（recall 工具 + 摘要压缩 hook **强化**——按 category 索引、压缩策略可热替换）
-- v0.4：评分基线（每个 turn 加 score）
-- v0.5：金蝉脱壳强化（自动 rollback + 世代谱 CLI）
-- v0.6：双分支雏形（git worktree 隔离）
-- v0.7：自动评分员（pytest + ruff + mypy）
-- v0.8：HIL 升级（实时中断）
-- v0.9：LangChain 评估（决定脱钩）
-- v1.0：稳定双 Agent（A/B 分支 + 角色互换 + 记忆连续 + 自动冻结）
-
----
-
-## 附：相关文档
-
-- [`docs/agent-capabilities.md`](agent-capabilities.md) — 父母写给 Agent 的能力清单 + 资料
-- [`docs/adr/0001-util-extraction-and-autonomous.md`](adr/0001-util-extraction-and-autonomous.md) — util/ 抽出 + 自驱动循环决策
-- [`docs/adr/0002-architecture-v0-sync.md`](adr/0002-architecture-v0-sync.md) — 上次同步：util 模块数 / CLI flags / 压缩 hook 状态
-- [`docs/adr/0003-snapshot-retention-v0.2.3.md`](adr/0003-snapshot-retention-v0.2.3.md) — 本次同步：snapshot 保留策略 + 文档与 v0.2.3 代码的漂移
-- [`ROADMAP.md`](../ROADMAP.md) — 版本进度
+| 版本 | 关键事件 | ADR |
+| --- | --- | --- |
+| v0.1.0 | 出生版（ReAct + HITL + 快照 + 记忆） | ADR-0001 |
+| v0.1.1 | util/ 抽 diary_archive / git_helpers | ADR-0001 D1 |
+| v0.1.2 | HTTP 父通道（补全 HIL） | ADR-0001 D2 |
+| v0.2.0 | compression hook（simple） | ADR-0002 D3 |
+| v0.2.3 | snapshot 保留策略 + cmd_blacklist_patterns | ADR-0003 |
+| v0.2.4 | 工具清单 14 → 15（补 memory_recall） | ADR-0004（本文档） |
+| v0.3 (planned) | 长期记忆强化（recall 工具 + 摘要压缩 hook 强化） | 待定 |
