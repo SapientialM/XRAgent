@@ -403,3 +403,134 @@ def test_schema_v55_migration_idempotent(repo_root):
     ).fetchall()
     assert idx_rows and idx_rows[0][0] == "idx_facts_active"
     m1.close()
+
+
+# === 5.7 新字段 + 新方法测试 ===
+
+def test_confidence_field_persists(repo_root):
+    """5.7: Fact dataclass 加 confidence 字段, save/recall 持久化。"""
+    m = MemoryManager()
+    f = m.save_fact(
+        "preference", "user 喜欢简洁", source_turn="t10",
+        source_turn_idx=10, confidence=0.7,
+    )
+    assert f.confidence == 0.7
+
+    hits = m.recall("简洁")
+    assert hits and hits[0].confidence == 0.7
+
+
+def test_save_fact_confidence_default_is_one(repo_root):
+    """5.7: 不传 confidence 时默认 1.0。"""
+    m = MemoryManager()
+    f = m.save_fact("note", "默认 confidence")
+    assert f.confidence == 1.0
+
+
+def test_confidence_is_clamped_on_save(repo_root):
+    """5.7: 越界 confidence (>1 或 <0) 被 clamp 到 [0, 1]。"""
+    m = MemoryManager()
+    hi = m.save_fact("note", "hi c", confidence=1.5)
+    assert hi.confidence == 1.0
+    lo = m.save_fact("note", "lo c", confidence=-0.3)
+    assert lo.confidence == 0.0
+
+
+def test_update_confidence_returns_updated_fact(repo_root):
+    """5.7: update_confidence 成功返回 Fact, 含新 confidence。"""
+    m = MemoryManager()
+    f = m.save_fact("note", "可更新 fact", confidence=0.5)
+    updated = m.update_confidence(f.id, 0.9)
+    assert isinstance(updated, Fact)
+    assert updated.id == f.id
+    assert updated.confidence == 0.9
+    # 落库后再 recall 也读得到新值
+    hits = m.recall("可更新")
+    assert hits and hits[0].confidence == 0.9
+
+
+def test_update_confidence_clamps_and_handles_missing(repo_root):
+    """5.7: update_confidence 也 clamp; 不存在 id 返回 None。"""
+    m = MemoryManager()
+    f = m.save_fact("note", "clamp test", confidence=0.3)
+    # 越界
+    updated = m.update_confidence(f.id, 99.0)
+    assert updated.confidence == 1.0
+    # 不存在的 id
+    assert m.update_confidence(999999, 0.5) is None
+
+
+def test_recall_by_min_confidence_filters_and_orders(repo_root):
+    """5.7: recall_by_min_confidence 按 confidence DESC, ts DESC。"""
+    m = MemoryManager()
+    m.save_fact("note", "high A", priority=0, confidence=0.9)
+    m.save_fact("note", "high B", priority=0, confidence=0.9)
+    m.save_fact("note", "mid", priority=0, confidence=0.6)
+    m.save_fact("note", "low", priority=0, confidence=0.2)
+
+    hits = m.recall_by_min_confidence(min_confidence=0.5, k=10)
+    contents = [h.content for h in hits]
+    # low 不应出现; high A/B + mid 出现
+    assert "low" not in contents
+    assert set(contents) == {"high A", "high B", "mid"}
+    # high 应排在 mid 之前 (confidence DESC)
+    high_pos = min(i for i, c in enumerate(contents) if c.startswith("high"))
+    mid_pos = contents.index("mid")
+    assert high_pos < mid_pos
+
+
+def test_recall_by_min_confidence_excludes_archived_by_default(repo_root):
+    """5.7: 默认排除 archived, include_archived=True 才召回。"""
+    m = MemoryManager()
+    kept = m.save_fact("note", "active", confidence=0.8)
+    gone = m.save_fact("note", "archived", confidence=0.8)
+    m.archive_fact(gone.id)
+
+    hits = m.recall_by_min_confidence(min_confidence=0.5, k=10)
+    contents = {h.content for h in hits}
+    assert "active" in contents
+    assert "archived" not in contents
+
+    # include_archived=True 才召回
+    all_hits = m.recall_by_min_confidence(
+        min_confidence=0.5, k=10, include_archived=True
+    )
+    assert {h.content for h in all_hits} == {"active", "archived"}
+
+
+def test_recall_by_min_confidence_with_category_and_k(repo_root):
+    """5.7: category + k 协同过滤。"""
+    m = MemoryManager()
+    m.save_fact("preference", "p high A", confidence=0.9)
+    m.save_fact("preference", "p high B", confidence=0.7)
+    m.save_fact("history", "h high", confidence=0.9)  # 不同 category
+
+    hits = m.recall_by_min_confidence(
+        min_confidence=0.5, k=10, category="preference"
+    )
+    contents = [h.content for h in hits]
+    assert "h high" not in contents
+    assert contents == ["p high A", "p high B"]
+    assert all(h.category == "preference" for h in hits)
+
+    # k 限制
+    k1 = m.recall_by_min_confidence(min_confidence=0.5, k=1, category="preference")
+    assert len(k1) == 1
+    assert k1[0].content == "p high A"
+
+
+def test_schema_v57_migration_idempotent(repo_root):
+    """5.7 migration: 反复 init 不应破坏, confidence 列不会被重复加。"""
+    m1 = MemoryManager()
+    cols1 = [r[1] for r in m1._conn.execute("PRAGMA table_info(facts)").fetchall()]
+    assert "confidence" in cols1
+
+    # 第二次调用不应抛, 也不应再加列
+    m1._migrate_v57()
+    cols2 = [r[1] for r in m1._conn.execute("PRAGMA table_info(facts)").fetchall()]
+    assert cols2.count("confidence") == 1
+
+    # 索引存在
+    idx = [r[1] for r in m1._conn.execute("PRAGMA index_list(facts)").fetchall()]
+    assert "idx_facts_confidence_ts" in idx
+    m1.close()
