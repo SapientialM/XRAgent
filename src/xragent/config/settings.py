@@ -76,6 +76,13 @@ class Settings(BaseSettings):
     # === run_cmd 黑名单 binary ===
     cmd_blacklist: tuple[str, ...] = ("wget", "ssh", "scp", "nc", "ncat")  # curl 已开放给 web_search 工具（带限流）
 
+    # === run_cmd 黑名单 regex patterns（用户自定义）===
+    # 与 ``cmd_blacklist``（binary 精确名）互补：本字段是 regex 列表，对 *整条 cmd*
+    # 走 ``re.search`` 匹配，命中即拦。允许通过 XRAGENT_CMD_BLACKLIST_PATTERNS 环境
+    # 变量（JSON 数组字符串）注入。
+    # 示例：["^\\s*rm\\b", "iptables\\s+.*flush", "mkfs\\."]
+    cmd_blacklist_patterns: tuple[str, ...] = ()
+
     # === 工具黑名单路径（仓库内相对路径 resolve 后） ===
     write_blacklist: tuple[str, ...] = (
         ".env",

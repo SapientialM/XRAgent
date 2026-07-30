@@ -71,7 +71,34 @@ _DANGEROUS_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 
+def compile_user_patterns(patterns: tuple[str, ...] | list[str]) -> tuple[re.Pattern[str], ...]:
+    """把用户传入的 regex 字符串列表编译成 compiled pattern 列表。
+
+    非法 regex 直接抛 ``ValueError``——"默认安全"：错误的拦截规则宁可让
+    启动失败（运维一眼能看到），也别静默忽略变成漏洞。调用方负责捕获
+    后向上抛 ``BlacklistedCommand`` 或 ``SettingsError``。
+    """
+    compiled: list[re.Pattern[str]] = []
+    for raw in patterns:
+        try:
+            compiled.append(re.compile(raw))
+        except re.error as e:
+            raise ValueError(f"非法 cmd_blacklist_patterns 条目 {raw!r}: {e}") from e
+    return tuple(compiled)
+
+
 def assert_command_allowed(cmd: str) -> str:
+    """三层叠加拦截：binary 黑名单 → 内置危险模式 → 用户自定义 regex。
+
+    顺序说明：
+      1. binary 黑名单：精确名（curl / wget / ssh …），误判面最小。
+      2. ``_DANGEROUS_PATTERNS``：硬编码、不可关闭的安全护栏。
+      3. ``Settings.cmd_blacklist_patterns``：用户/运维扩展入口，tuple of
+         regex 字符串；对整条 cmd 走 ``re.search``。
+
+    任意一层命中即抛 ``BlacklistedCommand``，错误文案携带具体命中原因
+    （binary 名 / 危险模式 / 用户 pattern 字面），方便 HITL 审批人判断。
+    """
     settings = get_settings()
     try:
         tokens = shlex.split(cmd)
@@ -83,4 +110,15 @@ def assert_command_allowed(cmd: str) -> str:
     for pat in _DANGEROUS_PATTERNS:
         if pat.search(cmd):
             raise BlacklistedCommand(f"危险模式命中: {pat.pattern}")
+    # 第三层：用户自定义 regex（非法条目由 compile_user_patterns 兜底）
+    try:
+        user_patterns = compile_user_patterns(settings.cmd_blacklist_patterns)
+    except ValueError as e:
+        # 配置错误不应阻塞合法命令：把黑名单退化为"只有内置规则"，
+        # 但保留 stderr 等价物（错误信息塞进 BlacklistedCommand 文案），
+        # 让运维在审批日志里能一眼看到；不在此处抛配置错误。
+        raise BlacklistedCommand(f"用户黑名单配置非法: {e}") from e
+    for pat in user_patterns:
+        if pat.search(cmd):
+            raise BlacklistedCommand(f"用户黑名单命中: {pat.pattern}")
     return cmd
