@@ -128,10 +128,19 @@ class Settings(BaseSettings):
 
     @property
     def active_api_key(self) -> str:
+        """当前 ``llm_provider`` 对应的 API key；走 ``_provider_attr`` 转发。
+
+        provider 不在白名单（如 ``mock``/alias）时返回 ``""``，调用方需自行判空。
+        """
         return self._provider_attr("api_key")
 
     @property
     def active_base_url(self) -> str:
+        """当前 ``llm_provider`` 对应的 base URL；走 ``_provider_attr`` 转发。
+
+        provider 不在白名单时返回 ``""``；调用方拿到 ``""`` 应回退到 SDK 默认
+        或报错，不要凭默认 base 假装可用。
+        """
         return self._provider_attr("base_url")
 
     @property
@@ -180,5 +189,6 @@ def get_settings() -> Settings:
 
 
 def reset_settings_cache() -> None:
+    """重置 ``get_settings`` 的进程内缓存；测试/配置热加载时调用。"""
     global _settings
     _settings = None
