@@ -116,6 +116,9 @@ def task_cooldown_key(task: dict[str, Any]) -> str:
 
 DEFAULT_COOLDOWN_S: float = 7200.0
 
+# summary 截断上限（保护 queue.jsonl 不被超长字段撑爆；提到模块常量便于测试 import 锁契约）
+_MAX_SUMMARY_CHARS: int = 500
+
 
 def _recent_titles(window_s: float = DEFAULT_COOLDOWN_S) -> set[str]:
     """返回最近 window_s 秒内做过的任务 title 集合（用于 cooldown）。
@@ -136,7 +139,14 @@ def _recent_titles(window_s: float = DEFAULT_COOLDOWN_S) -> set[str]:
     cutoff = time.time() - window_s
     seen: set[str] = set()
     for rec in iter_jsonl(p):
-        if rec.get("ts", 0) >= cutoff:
+        # rec 必须是 dict；非 dict（list/str/标量）跳过
+        if not isinstance(rec, dict):
+            continue
+        # ts 必须是数字（且不是 bool，bool 是 int 子类会被静默吞）
+        ts = rec.get("ts")
+        if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+            continue
+        if ts >= cutoff:
             seen.add(rec.get("title", ""))
     return seen
 
@@ -161,6 +171,8 @@ def next_task(rng: random.Random | None = None) -> dict[str, Any]:
     recent = _recent_titles()
     candidates = [t for t in TASK_TEMPLATES if task_cooldown_key(t) not in recent]
     if not candidates:
+        # 硬退化：所有模板都还在 cooldown，返回 [0] 让 Agent 自己想办法。
+        # 用索引而非 title 字面量，避免模板表顺序漂移时悄悄换 fallback。
         return TASK_TEMPLATES[0]
     return rng.choice(candidates)
 
@@ -183,7 +195,7 @@ def record_done(task: dict[str, Any], turn_id: str, summary: str) -> None:
         "ts": time.time(),
         "title": task["title"],
         "turn_id": turn_id,
-        "summary": summary[:500],
+        "summary": summary[:_MAX_SUMMARY_CHARS],
     }
     append_jsonl(task_queue_path(), rec)
 
