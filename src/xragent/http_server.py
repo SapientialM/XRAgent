@@ -66,6 +66,51 @@ def enqueue_message(text: str) -> None:
         raise RuntimeError("input queue 未注册；用 xragent.main --serve 启动")
 
 
+def _coerce_text(value: Any) -> str:
+    """把 JSON 字段值兜底成 strip 过的字符串。
+
+    之前 do_POST 直接写 ``(body.get("text") or "").strip()``——对 ``"foo"`` /
+    ``None`` 工作正常，但 ``{"text": 123}`` / ``{"text": ["x"]}`` 时
+    ``int.strip`` / ``list.strip`` 会 AttributeError 冒泡到 HTTP 层（500），
+    攻击者或前端 bug 都能触发。统一收敛：None → ""；str → strip；其他类型
+    走 ``str(...)`` 再 strip。
+
+    Args:
+        value: ``body.get(...)`` 的原始 JSON 反序列化值（任意类型）。
+
+    Returns:
+        strip 后的字符串；空字符串表示调用方应判 400。
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+def _coerce_content_length(raw: str | None) -> int:
+    """解析 Content-Length 头，失败/缺失返回 0（让上层走空 body 路径）。
+
+    ``self.headers.get("Content-Length", "0")`` 是字符串，原代码直接
+    ``int(...)`` 在客户端发 ``"abc"`` / ``""`` 时抛 ValueError 让整次
+    POST 500。这里把异常也收敛成 0，让 ``_read_json`` 后续 ``if length == 0``
+    分支兜底。
+
+    Args:
+        raw: ``Content-Length`` 头的原始字符串值；``None`` 时也返回 0。
+
+    Returns:
+        非负整数；非法输入一律返回 0。
+    """
+    if not raw:
+        return 0
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return n if n > 0 else 0
+
+
 def start_server_background(loop: "ReActLoop") -> None:
     """后台起 HTTP 服务线程（token 鉴权 + 4 个 endpoint）。
 
@@ -188,7 +233,7 @@ def _make_handler(token: str) -> type:
             Returns:
                 解析后的 dict；body 为空或解析失败时返回 None。
             """
-            length = int(self.headers.get("Content-Length", "0"))
+            length = _coerce_content_length(self.headers.get("Content-Length"))
             if length == 0:
                 return None
             try:
@@ -232,7 +277,7 @@ def _make_handler(token: str) -> type:
                 return
             body = self._read_json() or {}
             if self.path == "/message":
-                text = (body.get("text") or "").strip()
+                text = _coerce_text(body.get("text"))
                 if not text:
                     self._send_json(400, {"error": "empty text"})
                     return
