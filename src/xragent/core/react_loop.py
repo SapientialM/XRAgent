@@ -23,6 +23,57 @@ def make_assistant_message(turn) -> Message:
     return Message(role="assistant", content=turn.content or "", tool_calls=turn.tool_calls or None)
 
 
+def _format_turn_diary_body(
+    user_text: str,
+    final_content: str,
+    actions: list[dict],
+    wall_ms: int,
+    tokens_in: int,
+    tokens_out: int,
+    error: str | None,
+) -> str:
+    """拼装单 turn 的人类可读 diary body。
+
+    把"输入 / 回答 / 动作 / 耗时 / 错误"五段定长截断后用 ``\\n\\n`` 拼起来;
+    错误段只在 ``error`` 非空时追加,避免空标题。
+    """
+    lines = [
+        f"**输入**: {user_text[:200]}",
+        f"**回答**: {final_content[:400]}",
+        f"**动作**: {[a['tool'] for a in actions]}",
+        f"**耗时**: {wall_ms}ms · tokens_in={tokens_in} tokens_out={tokens_out}",
+    ]
+    if error:
+        lines.append(f"**错误**: {error}")
+    return "\n\n".join(lines) + "\n"
+
+
+def _record_turn_diary(
+    turn_id: str,
+    user_text: str,
+    final_content: str,
+    actions: list[dict],
+    wall_ms: int,
+    tokens_in: int,
+    tokens_out: int,
+    error: str | None,
+) -> None:
+    """把 turn 摘要追加到 ``diary/YYYY-MM-DD.md``;失败静默(不影响主流程)。
+
+    延迟 ``import`` diary_write 避免循环引用 (diary_tools 间接依赖 registry);
+    try 范围只包住 ``diary_write()`` 一行,让 import 失败的栈能传到上层排查。
+    """
+    from ..tools.diary_tools import diary_write
+    body = _format_turn_diary_body(
+        user_text, final_content, actions, wall_ms, tokens_in, tokens_out, error
+    )
+    try:
+        diary_write(title=f"turn {turn_id}", body=body)
+    except Exception:
+        # 日志写入失败不该拖垮 turn 返回值;与原本 "except Exception: pass" 等价。
+        pass
+
+
 class ReActLoop:
     def __init__(
         self, backend: BackendProtocol | None = None, registry: ToolRegistry | None = None,
@@ -99,20 +150,10 @@ class ReActLoop:
         )
         self.recorder.write(rec)
 
-        try:
-            from ..tools.diary_tools import diary_write
-            diary_write(
-                title=f"turn {turn_id}",
-                body=(
-                    f"**输入**: {user_text[:200]}\n\n"
-                    f"**回答**: {final_content[:400]}\n\n"
-                    f"**动作**: {[a['tool'] for a in actions]}\n\n"
-                    f"**耗时**: {wall_ms}ms · tokens_in={tokens_in} tokens_out={tokens_out}\n"
-                    + (f"**错误**: {error}" if error else "")
-                ),
-            )
-        except Exception:
-            pass
+        _record_turn_diary(
+            turn_id, user_text, final_content, actions,
+            wall_ms, tokens_in, tokens_out, error,
+        )
 
         self.snapshot.snapshot(turn_id + "-post", note=f"post-turn:{user_text[:40]}", tag=self.tag_snapshots)
 
