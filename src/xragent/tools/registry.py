@@ -75,7 +75,7 @@ class ToolRegistry:
     def get(self, name: str) -> ToolDef:
         if name not in self._tools:
             raise KeyError(f"未知工具: {name}")
-        return self._tools[name]
+        return self._tools[t.name]
 
     def names(self) -> list[str]:
         return list(self._tools.keys())
@@ -130,6 +130,13 @@ def build_default_registry() -> ToolRegistry:
     add("memory_save", "向长期记忆写入一条事实（SQLite）。",
         {"type": "object", "properties": {"category": {"type": "string"}, "content": {"type": "string"}}, "required": ["category", "content"]},
         "low", memory_tools.memory_save)
+    add("memory_recall", "关键词 LIKE 召回 fact (newest first)，回答我说过什么关于 X 的事。query 空时退化为全量最新 k 条。",
+        {"type": "object", "properties": {
+            "query": {"type": "string", "default": ""},
+            "k": {"type": "integer", "default": 5},
+            "category": {"type": "string"},
+        }},
+        "low", memory_tools.memory_recall)
     add("memory_recall_range", "按时间窗口从长期记忆召回 fact (newest first)。start_ts/end_ts 为 None 时表示开放端。",
         {"type": "object", "properties": {
             "start_ts": {"type": "number"},

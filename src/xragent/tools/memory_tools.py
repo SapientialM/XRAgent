@@ -91,3 +91,48 @@ def memory_top_frequent(
         "count": len(top),
         "top": [{"content": c, "count": cnt} for c, cnt in top],
     }
+
+
+def memory_recall(
+    query: str = "",
+    k: int = 5,
+    category: str | None = None,
+) -> dict[str, Any]:
+    """关键词 LIKE 召回 fact（newest first），回答"我说过什么关于 X 的事"。
+
+    与 ``memory_recall_range`` (时间窗口) 互补 —— 本工具回答"说过什么"。
+
+    Args:
+        query: 关键词，匹配 ``facts.content LIKE '%query%'``。空字符串表示
+            退化为全量最新 k 条（等价于不传 WHERE 子句）。
+        k: 最多返回条数，默认 5（关键词召回通常用于"补上下文"，不宜一次塞太多）。
+        category: 按分类过滤；``None`` 表示跨类搜索。
+
+    Returns:
+        ``dict[str, Any]``，LLM 工具契约字段：
+            * ``ok`` (bool): 始终 True
+            * ``count`` (int): 实际返回的 fact 数
+            * ``facts`` (list[dict[str, Any]]): 每条含 ``id`` (int) / ``ts`` (float)
+              / ``category`` (str) / ``content`` (str) 四个键
+
+    索引:
+        走 ``idx_facts_category_ts`` (category 非空时) 或 ``idx_facts_ts`` (无 category
+        时)，均能让 ``ORDER BY ts DESC LIMIT ?`` 提前结束。
+    """
+    m = MemoryManager()
+    # k 兜底: LLM 可能传 0 / 负数; clip 到 [1, 1000] 防止空结果或一次拉爆。
+    k_eff = max(1, min(int(k), 1000))
+    facts = m.recall(query=query, k=k_eff, category=category)
+    return {
+        "ok": True,
+        "count": len(facts),
+        "facts": [
+            {
+                "id": f.id,
+                "ts": f.ts,
+                "category": f.category,
+                "content": f.content,
+            }
+            for f in facts
+        ],
+    }
