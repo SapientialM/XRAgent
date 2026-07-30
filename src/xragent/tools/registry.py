@@ -94,9 +94,21 @@ class ToolRegistry:
         self._tools.pop(name, None)
 
     def get(self, name: str) -> ToolDef:
+        """按名取 :class:`ToolDef`（同步访问点；:meth:`run` 内部也走这里）。
+
+        Args:
+            name: 工具名。
+
+        Returns:
+            ToolDef: 已注册的同名工具定义。
+
+        Raises:
+            KeyError: ``name`` 不在注册表里（与 :meth:`dict.__getitem__` 语义一致；
+                :meth:`run` 会把这条异常透给调用方，由调用方决定是否包 envelope）。
+        """
         if name not in self._tools:
             raise KeyError(f"未知工具: {name}")
-        return self._tools[t.name]
+        return self._tools[name]
 
     def names(self) -> list[str]:
         """已注册的工具名列表（插入序；新 list，不暴露内部 dict）。"""
