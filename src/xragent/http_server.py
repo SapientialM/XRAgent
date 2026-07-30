@@ -21,6 +21,8 @@ _loop_ref: list = []
 # HTTP 父母通道常量
 # _http_approval_channel 等父母审批回复的最大等待时间；超时返回 REJECT。
 HTTP_REPLY_TIMEOUT_S: float = 120.0
+# /message 入队回执里截取的文本长度（避免长消息把响应体撑爆）。
+_TEXT_PREVIEW_CHARS: int = 80
 
 
 def register_input_queue(q: "queue.Queue") -> None:
@@ -83,6 +85,31 @@ def start_server_background(loop: "ReActLoop") -> None:
     t.start()
 
 
+def _decision_from_reply(reply: Any) -> Any:
+    """把 HTTP /approve 端点 put 进 reply queue 的对象转成 :class:`ApprovalResult`。
+
+    比 try/except 早一步拦截 ``reply`` 非 dict 的情况（攻击者塞 list/None
+    等），避免把"网络超时"与"payload 格式错误"混为同一类失败。
+
+    Args:
+        reply: ``_http_reply_queue.get`` 取到的原始 JSON 解析结果（任意类型）。
+
+    Returns:
+        ``reply`` 为 dict 时按 ``decision`` / ``new_args`` / ``reason`` 字段
+        构造 ``ApprovalResult``；非 dict 时返回 ``Decision.REJECT`` 并附
+        ``reason='invalid reply payload'``。
+    """
+    from .hitl.gate import ApprovalResult, Decision
+    if not isinstance(reply, dict):
+        return ApprovalResult(decision=Decision.REJECT, reason="invalid reply payload")
+    decision = Decision(reply.get("decision", "reject"))
+    return ApprovalResult(
+        decision=decision,
+        edited_args=reply.get("new_args"),
+        reason=reply.get("reason", ""),
+    )
+
+
 def _http_approval_channel(req: Any) -> Any:
     """HTTP 版的审批 channel：从 reply queue 取一次审批结果。
 
@@ -95,11 +122,9 @@ def _http_approval_channel(req: Any) -> Any:
         :class:`ApprovalResult`：成功时按 reply 内容构造，超时/异常时
         返回 ``Decision.REJECT`` 并附带 reason。
     """
-    from .hitl.gate import ApprovalResult, Decision
     try:
         reply = _http_reply_queue.get(timeout=HTTP_REPLY_TIMEOUT_S)
-        decision = Decision(reply.get("decision", "reject"))
-        return ApprovalResult(decision=decision, edited_args=reply.get("new_args"), reason=reply.get("reason", ""))
+        return _decision_from_reply(reply)
     except Exception as e:
         return ApprovalResult(decision=Decision.REJECT, reason=f"http channel error: {e}")
 
@@ -212,7 +237,7 @@ def _make_handler(token: str) -> type:
                     self._send_json(400, {"error": "empty text"})
                     return
                 enqueue_message(text)
-                self._send_json(200, {"ok": True, "queued": text[:80]})
+                self._send_json(200, {"ok": True, "queued": text[:_TEXT_PREVIEW_CHARS]})
                 return
             if self.path == "/approve":
                 _http_reply_queue.put(body)
