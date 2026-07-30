@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""和 XRAgent 对话的 REPL：readline → POST /message → poll /last-answer。
+
+前提：launchd 已拉起 supervisor + autonomous child，HTTP 跑在 $XRAGENT_HTTP_PORT（默认 11086）。
+"""
+import json
+import os
+import sys
+import time
+import urllib.request
+
+PORT = int(os.environ.get("XRAGENT_HTTP_PORT", "11086"))
+HOST = os.environ.get("XRAGENT_HOST", "127.0.0.1")
+BASE = f"http://{HOST}:{PORT}"
+
+
+def _post(path: str, payload: dict, timeout: float = 5.0) -> dict:
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{BASE}{path}", data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8") or "{}")
+
+
+def _get(path: str, timeout: float = 5.0) -> dict:
+    with urllib.request.urlopen(f"{BASE}{path}", timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8") or "{}")
+
+
+def _post_text(text: str) -> dict:
+    return _post("/message", {"text": text})
+
+
+def _get_last_answer(prev_ts: float, timeout: float = 120.0) -> dict:
+    """轮询 /last-answer 直到 ts 变化（说明 Agent 跑了这条）。"""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        ans = _get("/last-answer")
+        if ans.get("ts", 0) > prev_ts and ans.get("answer"):
+            return ans
+        time.sleep(1.5)
+    return {"answer": "(timeout)", "ts": 0.0}
+
+
+def main() -> int:
+    # health check
+    try:
+        h = _get("/health")
+    except Exception as e:
+        print(f"无法连 {BASE}/health: {e}", file=sys.stderr)
+        print("是不是 launchd 没起？跑 `scripts/manage launchd-start`", file=sys.stderr)
+        return 1
+    print(f"=== XRAgent chat ===  PID={h.get('pid')}  restarts={h.get('restart_count')}")
+    print(f"POST 你的消息，回车后等 Agent 回复（最长 120s）")
+    print("输入 /quit 退出，/status 看心跳\n")
+
+    prev_ts = 0.0
+    while True:
+        try:
+            line = input("you> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not line:
+            continue
+        if line in ("/quit", "/exit"):
+            return 0
+        if line == "/status":
+            print(json.dumps(_get("/health"), ensure_ascii=False, indent=2))
+            continue
+        if line == "/last":
+            print(json.dumps(_get("/last-answer"), ensure_ascii=False, indent=2))
+            continue
+        try:
+            r = _post_text(line)
+        except Exception as e:
+            print(f"POST 失败: {e}", file=sys.stderr)
+            continue
+        if not r.get("ok"):
+            print(f"Agent 拒绝: {r}", file=sys.stderr)
+            continue
+        # 等回复
+        print("(等 Agent...)")
+        ans = _get_last_answer(prev_ts)
+        prev_ts = ans.get("ts", prev_ts)
+        text = ans.get("answer", "")
+        if text:
+            print(f"xr> {text}\n")
+        else:
+            print("(无回复)\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
