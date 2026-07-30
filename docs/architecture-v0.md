@@ -1,6 +1,7 @@
 # XRAgent 架构摘要（v0.1 出生版）
 
 > 完整方案在多次迭代中展开；此文档是 v0.1 出生时的快速地图。
+> 当代码与本文档冲突时：**代码为准**，并在 `docs/adr/` 记录决策。详见 [ADR-0002](adr/0002-architecture-v0-sync.md)。
 
 ## 一、五大核心
 
@@ -15,8 +16,13 @@
 补充说明：
 
 - **自驱动（autonomous）** 不是 AGI，是"按 task templates + ReAct + commit"在没人在时也稳定推进的循环；
-  模板见 `src/xragent/autonomous.py::TASK_TEMPLATES`，冷却 2h，`memory/queue.jsonl` 留痕（不入 git）。
+  模板见 `src/xragent/autonomous.py::TASK_TEMPLATES`（共 8 个），默认冷却 2h（`DEFAULT_COOLDOWN_S=7200`），
+  `memory/queue.jsonl` 留痕（不入 git）。
 - **util/** 是按"出现 2+ 次且 ≥5 行"原则抽出的共享小工具，避免过早抽象。
+  当前 5 个模块：`json_utils` / `jsonl_utils` / `subprocess_utils` / `diary_archive` / `git_helpers`
+  （见 ADR-0001 D1，diary_archive + git_helpers 为 v0.1.1 后续增量）。
+- **压缩策略**：`compression/hook.py` 是策略注册表，`compression/simple.py` 是默认实现；
+  `react_loop.py` 在每轮 ReAct 已调用 `memory.compress_if_needed(...)`（详见 ADR-0002 D3）。
 
 ## 二、模块清单
 
@@ -26,10 +32,10 @@ src/xragent/
 ├── core/dream.py              # AGENTS.md 加载
 ├── core/backend.py            # BackendProtocol + Mock + LangChain
 ├── core/turn.py               # TurnRecord + TraceRecorder
-├── core/react_loop.py         # ReAct 主循环
-├── memory/manager.py          # SQLite 长期事实
-├── compression/simple.py      # 最简压缩
-├── compression/hook.py        # 压缩策略注册表
+├── core/react_loop.py         # ReAct 主循环（含 compress_if_needed 调用）
+├── memory/manager.py          # SQLite 长期事实 + compress_if_needed 封装
+├── compression/simple.py      # 最简压缩（SimpleCompression.compress）
+├── compression/hook.py        # 压缩策略注册表（已注册 simple）
 ├── snapshot/side_git.py       # 每个 turn snapshot
 ├── hitl/gate.py               # 三态决策
 ├── tools/blacklist.py         # PathSandbox + binary 黑名单
@@ -44,11 +50,15 @@ src/xragent/
 ├── evolve/generations.py      # 世代谱
 ├── evolve/metamorphosis.py    # 金蝉脱壳
 ├── autonomous.py              # 自驱动循环 + 8 个 task templates
-├── util/                      # 共享小工具（json_utils / jsonl_utils / subprocess_utils）
+├── llm/                       # 多 provider 适配 stub（v0.2 落地，目前仅 __init__.py）
+├── util/                      # 共享小工具（5 模块，详见 §一）
 ├── watchdog/runtime_state.py
 ├── watchdog/supervisor.py     # 24h 守护
-├── http_server.py             # 父母通道
-└── main.py                    # CLI 入口（--smoke / --once / --serve / --as-supervised / --autonomous / --freeze）
+├── http_server.py             # 父母通道（/health /message /last-answer /approve）
+└── main.py                    # CLI 入口
+                              # --smoke / --once / --serve / --as-supervised
+                              # --autonomous [--interval N --max-rounds N]
+                              # --freeze
 ```
 
 工具总数：**14 个**（`build_default_registry()` 注册，详见 §三）。`evolution_enabled=false` 时
@@ -81,6 +91,7 @@ src/xragent/
 4. **HITL 门**：高危工具（write_file / run_cmd / git_commit / git_push / propose_self_replace / terminate）走审批
 5. **同记忆**：facts.db + diary/turns/ + generations.jsonl 在仓库根，跨重启保留
 6. **SideGit 不动源代码**：snapshot 只 stash tracked changes（v0.1 修复后）
+7. **代码 / 文档单一真相源**：当代码与本文档冲突时以代码为准，差异在 `docs/adr/` 留痕
 
 ## 五、24h 自愈协议
 
@@ -97,17 +108,18 @@ supervisor (watchdog/supervisor.py)
 ## 六、HTTP 父母通道
 
 ```
-GET  /health          → {pid, heartbeat_ts, restart_count, metamorphosis_pending}
+GET  /health          → runtime_state (pid/heartbeat_ts/restart_count)
 POST /message {text}  → enqueue 到主循环 input_queue
-GET  /last-answer     → {answer, ts}
-POST /approve {id,...}→ 回复被挂起的审批（用于 HITL HTTP 通道）
+GET  /last-answer     → 返回最近一次 LLM answer
+POST /approve {id,...}→ 回复 HITL gate 一次（用于 HITL HTTP 通道）
 ```
 
 ## 七、演进路线
 
 - v0.1 (current)：出生 — ReAct + **14 工具** + HITL + Side-Git + Dream + Diary + 蜕皮 + HTTP 父母 + 自驱动循环
+  + **压缩 hook 已接入**（react_loop 每轮调用 memory.compress_if_needed，v0.3 仅做强化而非启用）
 - v0.2：多 LLM provider 适配（OpenAI / DeepSeek / GLM / Mock；`llm/` 包已留空 stub）
-- v0.3：长期记忆强化（recall 工具 + 摘要压缩 hook 启用）
+- v0.3：长期记忆强化（recall 工具 + 摘要压缩 hook **强化**——按 category 索引、压缩策略可热替换）
 - v0.4：评分基线（每个 turn 加 score）
 - v0.5：金蝉脱壳强化（自动 rollback + 世代谱 CLI）
 - v0.6：双分支雏形（git worktree 隔离）
@@ -115,3 +127,12 @@ POST /approve {id,...}→ 回复被挂起的审批（用于 HITL HTTP 通道）
 - v0.8：HIL 升级（实时中断）
 - v0.9：LangChain 评估（决定脱钩）
 - v1.0：稳定双 Agent（A/B 分支 + 角色互换 + 记忆连续 + 自动冻结）
+
+---
+
+## 附：相关文档
+
+- [`docs/agent-capabilities.md`](agent-capabilities.md) — 父母写给 Agent 的能力清单 + 资料
+- [`docs/adr/0001-util-extraction-and-autonomous.md`](adr/0001-util-extraction-and-autonomous.md) — util/ 抽出 + 自驱动循环决策
+- [`docs/adr/0002-architecture-v0-sync.md`](adr/0002-architecture-v0-sync.md) — 本次同步：util 模块数 / CLI flags / 压缩 hook 状态
+- [`ROADMAP.md`](../ROADMAP.md) — 版本进度
