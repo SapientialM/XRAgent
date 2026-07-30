@@ -109,8 +109,12 @@ def build_default_registry() -> ToolRegistry:
     def add(name, desc, schema, risk, fn):
         r.register(ToolDef(name=name, description=desc, input_schema=schema, risk=risk, handler=fn))
 
-    add("read_file", "读取仓库内文件内容；目标必须位于仓库根之下。",
-        {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+    add("read_file", "读取仓库内文本文件，可选 max_bytes 截断（仅返回首 N 字节；超出时 truncated=True）。",
+        {"type": "object", "properties": {
+            "path": {"type": "string"},
+            "max_bytes": {"type": "integer", "minimum": 1,
+                          "description": "可选字节上限；None / 0 / 负数 / 非 int → 不截断（向后兼容）。"},
+        }, "required": ["path"]},
         "low", fs_tools.read_file)
     add("list_dir", "列出仓库内目录内容（不含 .git）。",
         {"type": "object", "properties": {"path": {"type": "string", "default": "."}}},

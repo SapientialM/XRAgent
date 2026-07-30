@@ -12,6 +12,12 @@
     - 路径越出 repo_root（绝对路径 & ../ 逃逸）→ ok=False 含 "目标越界"
     - 显式声明：当前 read_file 不查 is_protected（AGENTS.md/.env 等
       读保护还没启用）—— 这一锁定用作未来引入 read 黑名单的快照基线
+    - v0.2 新增 max_bytes 参数：
+        * 默认 None → 与旧行为完全一致（向后兼容）
+        * cap 大于文件 → 全读，truncated=False
+        * cap 小于文件 → 截断到首 cap 字节，truncated=True
+        * cap=0 / 负数 / 非 int → 退回无上限（对齐 _resolve_timeout 宽松策略）
+        * 多字节字符边界被切 → 不 raise，errors="replace" 丢字符保命
 * list_dir
     - 已存在目录 → ok=True，entries 列表里没有 .git/
     - 路径指向文件 → ok=False（因为 is_dir() == False）
@@ -21,6 +27,10 @@
     - 仓库内路径 → (Path, None)
     - 越界路径 → (None, 错误文案)
     - 黑名单命中（write 系列：.env）→ (None, 错误文案)
+* _read_text_capped（白盒）
+    - max_bytes 无效（None/0/负数/str/bool）→ 当无上限，truncated=False
+    - 文件 fit → 全文，truncated=False
+    - 文件超 cap → 仅前 cap 字节 + truncated=True
 
 不在本测试覆盖：二进制解码错误（实现细节、易变）。
 """
@@ -29,6 +39,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from xragent.tools.fs_tools import (
+    _read_text_capped,
     _resolve_inside,
     _resolve_writable,
     list_dir,
@@ -51,6 +62,8 @@ def test_read_file_happy_path_returns_relative_path_and_content(repo_root: Path)
     assert out["path"] == "sandbox/note.txt"
     assert out["size"] == len("hello\nworld\n")
     assert out["content"] == "hello\nworld\n"
+    # v0.2 新增 truncated 字段；默认 max_bytes=None 时必须 False
+    assert out["truncated"] is False
 
 
 def test_read_file_missing_target_returns_ok_false(repo_root: Path):
@@ -90,6 +103,128 @@ def test_read_file_currently_does_not_block_agents_md(repo_root: Path):
     out = read_file("AGENTS.md")
     assert out["ok"] is True
     assert "TEST DREAM" in out["content"]
+
+
+# ---- v0.2 max_bytes 参数 --------------------------------------------------------
+
+
+def test_read_file_max_bytes_default_is_backward_compatible(repo_root: Path):
+    """不传 max_bytes / 显式传 None → 与历史行为完全一致（truncated=False）。"""
+    f = repo_root / "sandbox" / "long.txt"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("abcdef" * 100, encoding="utf-8")  # 600 bytes
+
+    out_default = read_file("sandbox/long.txt")
+    out_explicit = read_file("sandbox/long.txt", max_bytes=None)
+    assert out_default == out_explicit
+    assert out_default["ok"] is True
+    assert out_default["size"] == 600
+    assert out_default["truncated"] is False
+    assert len(out_default["content"]) == 600
+
+
+def test_read_file_max_bytes_larger_than_file_is_no_op(repo_root: Path):
+    """cap 远大于文件 → 全读、truncated=False。"""
+    f = repo_root / "sandbox" / "short.txt"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("hi", encoding="utf-8")
+
+    out = read_file("sandbox/short.txt", max_bytes=1000)
+    assert out["ok"] is True
+    assert out["content"] == "hi"
+    assert out["size"] == 2
+    assert out["truncated"] is False
+
+
+def test_read_file_max_bytes_truncates_and_marks_flag(repo_root: Path):
+    """cap 小于文件 → 只返前 cap 字节、truncated=True、size=实际返回字符数。"""
+    f = repo_root / "sandbox" / "big.txt"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("X" * 10_000, encoding="utf-8")
+
+    out = read_file("sandbox/big.txt", max_bytes=123)
+    assert out["ok"] is True
+    assert out["truncated"] is True
+    assert len(out["content"]) == 123
+    # ASCII 场景下 size (chars) == bytes
+    assert out["size"] == 123
+
+
+def test_read_file_max_bytes_invalid_values_fall_back_to_unlimited(repo_root: Path):
+    """0 / 负数 / str / bool → 全部退回"无上限"（对齐 _resolve_timeout 宽松策略）。
+
+    动机: LLM 传错类型时, 我们宁可多吐点字节也别把整次 read 拒了,
+    反正 truncated 字段会照实报告。
+    """
+    f = repo_root / "sandbox" / "doc.txt"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("payload", encoding="utf-8")
+
+    for bad in (0, -1, -100, "", "abc", True, False, 3.14):
+        out = read_file("sandbox/doc.txt", max_bytes=bad)  # type: ignore[arg-type]
+        assert out["ok"] is True, f"max_bytes={bad!r} should fall back to unlimited"
+        assert out["content"] == "payload"
+        assert out["truncated"] is False, f"max_bytes={bad!r} must not pretend it truncated"
+
+
+def test_read_file_max_bytes_at_multi_byte_boundary_does_not_crash(repo_root: Path):
+    """cap 切在多字节字符中间 → 不能 UnicodeDecodeError 崩掉工具契约。
+
+    我们用 errors="replace" 解码, 宁可丢字符也保证 dict 返回;
+    truncated=True 告诉 LLM 信息确实丢了。
+    """
+    f = repo_root / "sandbox" / "utf8.txt"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    # "中" 是 3-byte UTF-8; 第 2 字节处截断会切碎它
+    f.write_text("中文中文中文", encoding="utf-8")  # 18 bytes
+    # 找 1 个不整除 3 的截断点, 让 multi-byte 边界必然被切
+    out = read_file("sandbox/utf8.txt", max_bytes=5)
+    assert out["ok"] is True, "切在多字节字符中间必须仍 ok=True"
+    assert out["truncated"] is True
+    # 返回的字符数 <= 5 (可能更少, 因为 decode 已合并 partial bytes)
+    assert len(out["content"]) <= 5
+    assert isinstance(out["content"], str)
+
+
+# ---------------------------------------------------------------------------
+# _read_text_capped  (白盒: refactor 行为锁)
+# ---------------------------------------------------------------------------
+
+
+def test_read_text_capped_invalid_max_bytes_returns_full(repo_root: Path):
+    """max_bytes 无效 → 全文 + truncated=False (与 read_file 公开行为一致)。"""
+    f = repo_root / "sandbox" / "x.txt"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("hello", encoding="utf-8")
+
+    for bad in (None, 0, -1, "abc", True):
+        text, truncated = _read_text_capped(f, max_bytes=bad)  # type: ignore[arg-type]
+        assert text == "hello"
+        assert truncated is False
+
+
+def test_read_text_capped_within_limit_returns_full(repo_root: Path):
+    f = repo_root / "sandbox" / "y.txt"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("12345", encoding="utf-8")
+
+    text, truncated = _read_text_capped(f, max_bytes=10)
+    assert text == "12345"
+    assert truncated is False
+
+    text, truncated = _read_text_capped(f, max_bytes=5)  # 边界 ==
+    assert text == "12345"
+    assert truncated is False
+
+
+def test_read_text_capped_oversize_truncates_to_exact_cap(repo_root: Path):
+    f = repo_root / "sandbox" / "z.txt"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("abcdefghij", encoding="utf-8")  # 10 bytes
+
+    text, truncated = _read_text_capped(f, max_bytes=4)
+    assert text == "abcd"
+    assert truncated is True
 
 
 # ---------------------------------------------------------------------------

@@ -21,6 +21,44 @@ def _fail(error: str) -> dict[str, Any]:
     return {"ok": False, "error": error}
 
 
+def _read_text_capped(path: Path, *, max_bytes: int | None) -> tuple[str, bool]:
+    """读取 ``path`` 的 utf-8 文本, 必要时按字节截断。
+
+    行为约定:
+      * ``max_bytes`` 为 None / 非 int / bool / <= 0 → 当作无上限,
+        保持旧 ``read_file`` 行为 (向后兼容 + 容忍 LLM 传错类型)。
+        这一宽松策略对齐 ``exec_tools._resolve_timeout``, 避免一个
+        类型错误就把整次 read 搞挂。
+      * 文件 size <= max_bytes → 返回全文, ``truncated=False``.
+      * 文件 size >  max_bytes → 只读前 ``max_bytes`` 字节, ``truncated=True``.
+        用 binary 模式读取 + ``errors="replace"`` 解码, 防止恰好切在
+        多字节字符边界时 UnicodeDecodeError 把工具搞崩 (``read_file``
+        的契约是 "始终返回 dict", 所以宁可丢字符也别 raise)。
+
+    Args:
+        path: 已过围栏校验的仓库内 Path。
+        max_bytes: 字节上限。语义见上。
+
+    Returns:
+        ``(text, truncated)``: ``text`` 是返回的字符串, ``truncated`` 表示
+        文件是否被截断 (True 表示有字节没读到, 调用方应自行决定是否
+        再翻页 / 换工具)。
+    """
+    if (
+        max_bytes is None
+        or not isinstance(max_bytes, int)
+        or isinstance(max_bytes, bool)
+        or max_bytes <= 0
+    ):
+        return path.read_text(encoding="utf-8"), False
+    size = path.stat().st_size
+    if size <= max_bytes:
+        return path.read_text(encoding="utf-8"), False
+    with path.open("rb") as f:
+        raw = f.read(max_bytes)
+    return raw.decode("utf-8", errors="replace"), True
+
+
 # -------------------- 路径围栏 helpers --------------------
 
 def _resolve_inside(path: str) -> tuple[Path | None, str | None]:
@@ -56,12 +94,18 @@ def _resolve_writable(path: str) -> tuple[Path | None, str | None]:
 
 # -------------------- public tools --------------------
 
-def read_file(path: str) -> dict[str, Any]:
+def read_file(path: str, max_bytes: int | None = None) -> dict[str, Any]:
     """读取仓库内文本文件。
 
     路径围栏由 ``PathSandbox.assert_inside`` 负责 (不查黑名单, 保留
     读取当前对 AGENTS.md/.env 等的现有契约——见 test_fs_tools 中
     ``test_read_file_currently_does_not_block_agents_md`` 锁定的快照)。
+
+    ``max_bytes`` 是 v0.2 新增的可选字节上限: 防止单次返回巨大文件把
+    LLM context window 打爆。语义与 ``_read_text_capped`` 对齐——
+    传 None / 非正数 / 非 int 都退回 "读全文" 的旧行为 (向后兼容);
+    真正超出时返回的 ``truncated`` 字段会标 True, 让 LLM 知道有字节
+    被截掉、可能要换 ``list_dir`` / ``memory_recall`` 等更轻的工具。
 
     失败路径统一返回 ``_fail(error)``:
       * 越界 → 由 PathSandbox 给文案
@@ -71,7 +115,10 @@ def read_file(path: str) -> dict[str, Any]:
     Returns:
         ``dict[str, Any]``, LLM 工具契约字段:
             * ``ok`` (bool): True 表示读取成功
-            * 成功时附加 ``path`` / ``size`` / ``content`` (str / int / str)
+            * 成功时附加 ``path`` / ``size`` / ``content`` / ``truncated``
+              (str / int / str / bool) — ``size`` 是返回内容字符数
+              (ASCII 文件下等于字节数); ``truncated`` 仅当 max_bytes
+              真生效且文件更长时为 True
             * 失败时附加 ``error`` (str): 含字段名 + 实际类型 / 错误类名
     """
     target, err = _resolve_inside(path)
@@ -83,7 +130,7 @@ def read_file(path: str) -> dict[str, Any]:
     if target.is_dir():
         return _fail(f"目标是目录，不能 read: {path}")
     try:
-        content = target.read_text(encoding="utf-8")
+        content, truncated = _read_text_capped(target, max_bytes=max_bytes)
     except UnicodeDecodeError:
         return _fail(f"非 utf-8 文件: {path}")
     except OSError as e:
@@ -91,7 +138,13 @@ def read_file(path: str) -> dict[str, Any]:
         # 之前直接上抛会破坏 "工具始终返回 dict" 的承诺 (test_fs_tools_oserror.py 锁)。
         return _fail(f"读取失败: {type(e).__name__}: {e}")
     rel = target.relative_to(get_settings().repo_root).as_posix()
-    return {"ok": True, "path": rel, "size": len(content), "content": content}
+    return {
+        "ok": True,
+        "path": rel,
+        "size": len(content),
+        "content": content,
+        "truncated": truncated,
+    }
 
 
 def list_dir(path: str = ".") -> dict[str, Any]:
