@@ -24,10 +24,15 @@ side_git 和 subprocess_utils 里同时被看到, 现有测试不需要改。
 **v0.5 refactor (本轮)**: 删除仅 1 处调用的 ``_to_tuple`` helper, 改为内联 —
 违反"不抽只调用一次的 helper"原则; ``run_capture`` 顶层已经 cover 了"完成
 subprocess 调用并提取三件套"职责, 再抽一层反而割裂语义。净 -3 行。
+
+**typing (本轮)**: ``cwd`` 类型注解 ``Path | str | None`` 之前缺 ``Path`` 的 import,
+靠 ``from __future__ import annotations`` 兜住 (lazy 评估)。补 ``from pathlib import
+Path`` 让运行时也能解析 (e.g. ``typing.get_type_hints`` / Sphinx 文档生成)。
 """
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 
 # ``returncode`` 哨兵: 表示"运行过程本身失败"（timeout / binary 缺失 / OS error）,
