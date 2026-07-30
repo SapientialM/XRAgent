@@ -29,9 +29,10 @@ def iter_jsonl(
 
     Args:
         path: JSONL 文件路径。文件不存在时直接结束（yield 0 个），不抛 FileNotFoundError。
-        max_lines: 最多 yield 多少条记录；``None`` = 读到文件末尾。
-            给 ``None``/``<=0`` = 不限制（按文件实际行数）。
+        max_lines: 最多 yield 多少条**有效记录**；``None``/``<=0`` = 不限制（按文件实际行数）。
             用于"只取前 N 条"场景（例如最近 10 条 task 记录），不必把整文件读进内存。
+            注意：名额只对"成功 yield 的记录"计数；空行 / 解析失败行不占名额，
+            所以坏行不会让调用方少收有效记录。
 
     Yields:
         解析后的对象（dict / list / 标量均可，类型由调用方负责）。
@@ -54,12 +55,8 @@ def iter_jsonl(
     # 避免 read_text().splitlines() 预建整文件 lines 列表的内存开销。
     # encoding="utf-8-sig" 自动处理首行 BOM（边界条件）；纯 utf-8 文件不受影响。
     with path.open("r", encoding="utf-8-sig") as f:
-        for i, line in enumerate(f):
-            if has_limit and i >= max_lines:
-                # 早返：避免把整文件读完才发现"我只要前 N 条"。
-                # i 是已 yield 数（含被跳过的坏行/空行），但调用方关心的是
-                # "最多 yield 多少个有效 rec"，用 i 偏紧一格是安全的（不会多 yield）。
-                return
+        yielded = 0
+        for line in f:
             line = line.strip()
             if not line:
                 continue
@@ -67,6 +64,12 @@ def iter_jsonl(
             if rec is None:
                 continue
             yield rec
+            # 计数放在 yield 之后：名额只对"成功 yield 的有效记录"生效，
+            # 坏行/空行不占名额 → 调用方拿到 max_lines 个有效 rec（不是 ≤）。
+            yielded += 1
+            if has_limit and yielded >= max_lines:
+                # 早返：避免把整文件读完才发现"我只要前 N 条"。
+                return
 
 
 def read_jsonl(path: Path, max_lines: int | None = None) -> list[Any]:
