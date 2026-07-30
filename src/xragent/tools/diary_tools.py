@@ -1,4 +1,13 @@
-"""diary 写入。"""
+"""diary 写入 / 归档工具。
+
+历史
+----
+2026-07-30 round：``diary_write`` 之前没有 OSError 兜底，遇到 PermissionError /
+磁盘满时会直接向上抛 OSError，破坏 LLM 工具层 "always returns dict" 的契约
+（``fs_tools`` 已经统一改造过，本次把 ``diary_tools`` 也对齐）。同时把
+``## [HH:MM:SS] title\\n\\nbody\\n`` 块格式抽成 ``_format_block`` helper，
+方便后续 ``diary_archive`` / 别的写日记入口复用同一种格式。
+"""
 from __future__ import annotations
 
 import time
@@ -8,15 +17,21 @@ from ..config.settings import get_settings
 from .blacklist import PathSandbox
 
 
+def _fail(error: str) -> dict[str, Any]:
+    """``ok=False`` 字典工厂；与 ``fs_tools._fail`` 同形 (LLM 工具层契约对齐)。"""
+    return {"ok": False, "error": error}
+
+
 def _require_nonblank(field: str, value: object) -> str | None:
-    """非空白字符串校验：失败返回错误信息，成功返回 None。
+    """非空白字符串校验。
 
     Args:
-        field: 字段名（用于错误信息中点名），例如 ``"title"`` / ``"body"``。
-        value: 待校验的值；接受任意类型，非字符串或纯空白都会被拒。
+        field: 字段名 (用于错误信息中点名), 例如 ``"title"`` / ``"body"``。
+        value: 待校验的值; 接受任意类型, 非字符串或纯空白都会被拒。
 
     Returns:
-        ``None`` 表示校验通过；否则返回描述性错误信息（已包含字段名 + 实际类型）。
+        ``None`` 表示校验通过; 否则返回描述性错误信息 (已包含字段名 +
+        实际类型名), 调用方直接放进 ``_fail(...)``.
     """
     if not isinstance(value, str):
         return f"{field} 必须是字符串，实际类型 {type(value).__name__}"
@@ -25,34 +40,53 @@ def _require_nonblank(field: str, value: object) -> str | None:
     return None
 
 
+def _format_block(ts: str, title: str, body: str) -> str:
+    """组装 ``\\n## [ts] title\\n\\nbody\\n`` 块。
+
+    抽出原因: diary_write 与未来的 re-archive 工具都要拼同一种块头格式,
+    把格式漂移集中到一处, 跨天阅读时不会出现 "昨天是 ``## [ts] title``,
+    今天变成 ``## ts - title``" 这种割裂。body 末尾 ``rstrip`` 也统一
+    在此完成, 调用方传入任意尾部空白都安全 (避免块间出现连续 3+ 空行)。
+    """
+    return f"\n## [{ts}] {title}\n\n{body.rstrip()}\n"
+
+
 def diary_write(title: str, body: str) -> dict[str, Any]:
     """在当天 diary 文件中追加一段 ``## [HH:MM:SS] <title>`` 记录。
 
-    写入前会做非空 / 纯空白校验，任何一项不通过都返回 ``ok=False`` 而
-    不触碰目标文件（避免校验失败时仍创建空 diary 文件，污染当日记录）。
+    写入前做非空 / 纯空白校验，任何一项不通过都返回 ``ok=False`` 而不触
+    碰目标文件（避免校验失败时仍创建空 diary 文件，污染当日记录）。
+    OSError (PermissionError / 磁盘满 / 文件被占) 也会被转成 ``ok=False``
+    而非上抛，遵循 LLM 工具调用层 "始终返回 dict" 的契约。
 
     Args:
-        title: 章节标题；非空且非纯空白。允许中文 / emoji / markdown 字符（按字面写入）。
-        body: 正文；非空且非纯空白。末尾的连续换行会被 ``rstrip`` 吃掉，避免块间出现多余空行。
+        title: 章节标题; 非空且非纯空白。允许中文 / emoji / markdown 字符
+            (按字面写入)。
+        body: 正文; 非空且非纯空白。末尾的连续换行会被 ``rstrip`` 吃掉。
 
     Returns:
-        ``dict[str, Any]``，LLM 工具契约字段：
-            * ``ok`` (bool): 校验 + 写入均成功为 True；任一字段校验失败为 False
-            * 成功时附加 ``path`` (str): 写入文件相对 ``repo_root`` 的 POSIX 路径
-              （如 ``"diary/2026-07-30.md"``），便于上层直接展示
-            * 失败时附加 ``error`` (str): 描述性错误信息，已包含字段名 + 实际类型
+        ``dict[str, Any]``，LLM 工具契约字段:
+            * ``ok`` (bool): 校验 + 写入均成功为 True; 任一字段校验失败 / OSError 为 False
+            * 成功时附加 ``path`` (str): 写入文件相对 ``repo_root`` 的 POSIX
+              路径 (如 ``"diary/2026-07-30.md"``)
+            * 失败时附加 ``error`` (str): 描述性错误信息, 校验失败时含字段
+              名 + 实际类型, OSError 时含 ``"写入失败: <type>: <msg>"``
     """
     for field, value in (("title", title), ("body", body)):
         err = _require_nonblank(field, value)
         if err is not None:
-            return {"ok": False, "error": err}
+            return _fail(err)
 
     sb = PathSandbox.from_settings()
     s = get_settings()
     day = time.strftime("%Y-%m-%d")
     target = sb.assert_writable(s.diary_dir / f"{day}.md")
     ts = time.strftime("%H:%M:%S")
-    block = f"\n## [{ts}] {title}\n\n{body.rstrip()}\n"
-    with target.open("a", encoding="utf-8") as f:
-        f.write(block)
-    return {"ok": True, "path": target.relative_to(sb.root).as_posix()}
+    block = _format_block(ts, title, body)
+    try:
+        with target.open("a", encoding="utf-8") as f:
+            f.write(block)
+    except OSError as e:
+        return _fail(f"写入失败: {type(e).__name__}: {e}")
+    rel_path: str = target.relative_to(sb.root).as_posix()
+    return {"ok": True, "path": rel_path}
