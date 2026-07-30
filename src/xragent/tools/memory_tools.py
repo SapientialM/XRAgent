@@ -3,7 +3,26 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..memory.manager import MemoryManager
+from ..memory.manager import Fact, MemoryManager
+
+
+def _fact_to_dict(fact: Fact) -> dict[str, Any]:
+    """把 :class:`Fact` 序列化成 LLM-facing 字典 (4 个字段, 顺序锁定)。
+
+    字段集 (``id`` / ``ts`` / ``category`` / ``content``) 是 LLM 工具契约
+    的一部分, ``test_memory_tools.py`` 锁定; 加字段必须同步更新本函数 +
+    加测试。``source_turn`` / ``source_turn_idx`` 是 5.0→5.1 DB 内部字段,
+    不暴露给 LLM (审计场景走 ``recall_by_turn_idx`` 而不是 ``memory_*``)。
+
+    抽出前 ``memory_recall`` 与 ``memory_recall_range`` 各写一份 4 字段
+    字面 dict; 一处加键就漏另一处。
+    """
+    return {
+        "id": fact.id,
+        "ts": fact.ts,
+        "category": fact.category,
+        "content": fact.content,
+    }
 
 
 def memory_save(category: str, content: str) -> dict[str, Any]:
@@ -46,22 +65,15 @@ def memory_recall_range(
             * ``ok`` (bool): 始终 True
             * ``count`` (int): 实际返回的 fact 数
             * ``facts`` (list[dict[str, Any]]): 每条含 ``id`` (int) / ``ts`` (float)
-              / ``category`` (str) / ``content`` (str) 四个键
+              / ``category`` (str) / ``content`` (str) 四个键 (序列化走
+              :func:`_fact_to_dict`; 字段集与顺序是 LLM 契约, 测试锁定)
     """
     m = MemoryManager()
     facts = m.recall_range(start_ts=start_ts, end_ts=end_ts, category=category, k=k)
     return {
         "ok": True,
         "count": len(facts),
-        "facts": [
-            {
-                "id": f.id,
-                "ts": f.ts,
-                "category": f.category,
-                "content": f.content,
-            }
-            for f in facts
-        ],
+        "facts": [_fact_to_dict(f) for f in facts],
     }
 
 
@@ -113,7 +125,8 @@ def memory_recall(
             * ``ok`` (bool): 始终 True
             * ``count`` (int): 实际返回的 fact 数
             * ``facts`` (list[dict[str, Any]]): 每条含 ``id`` (int) / ``ts`` (float)
-              / ``category`` (str) / ``content`` (str) 四个键
+              / ``category`` (str) / ``content`` (str) 四个键 (序列化走
+              :func:`_fact_to_dict`; 字段集与顺序是 LLM 契约, 测试锁定)
 
     索引:
         走 ``idx_facts_category_ts`` (category 非空时) 或 ``idx_facts_ts`` (无 category
@@ -126,13 +139,5 @@ def memory_recall(
     return {
         "ok": True,
         "count": len(facts),
-        "facts": [
-            {
-                "id": f.id,
-                "ts": f.ts,
-                "category": f.category,
-                "content": f.content,
-            }
-            for f in facts
-        ],
+        "facts": [_fact_to_dict(f) for f in facts],
     }

@@ -7,7 +7,12 @@ from __future__ import annotations
 
 import time
 
-from xragent.tools.memory_tools import memory_recall_range, memory_top_frequent
+from xragent.tools.memory_tools import (
+    _fact_to_dict,
+    memory_recall,
+    memory_recall_range,
+    memory_top_frequent,
+)
 
 
 def test_memory_recall_range_filters_by_window(repo_root):
@@ -145,3 +150,92 @@ def test_new_tools_registered_in_default_registry(repo_root):
     out = r.run("memory_recall_range", {})
     assert out["ok"] is True
     assert "facts" in out
+
+
+# ============================================================
+# _fact_to_dict helper 契约锁定 (v0.6 refactor)
+# ============================================================
+
+
+def test_fact_to_dict_returns_exactly_four_keys():
+    """_fact_to_dict 应产出严格 4 个键, 顺序固定。
+
+    这是 LLM-facing 序列化契约, 加字段必须同步: helper + 两处调用 + 本测试。
+    """
+    from xragent.memory.manager import Fact
+
+    fact = Fact(
+        id=42,
+        ts=1700000000.5,
+        category="preference",
+        content="user likes Rust",
+        source_turn="t-001",
+        source_turn_idx=7,
+    )
+    out = _fact_to_dict(fact)
+
+    assert list(out.keys()) == ["id", "ts", "category", "content"]
+    assert out["id"] == 42
+    assert out["ts"] == 1700000000.5
+    assert out["category"] == "preference"
+    assert out["content"] == "user likes Rust"
+
+
+def test_fact_to_dict_does_not_leak_internal_fields():
+    """5.0→5.1 新增的 source_turn / source_turn_idx 是 DB 内部字段,
+    LLM-facing 序列化应不暴露 (审计走 recall_by_turn_idx 而非 memory_*)。"""
+    from xragent.memory.manager import Fact
+
+    fact = Fact(
+        id=1, ts=1.0, category="x", content="y",
+        source_turn="internal-turn-id", source_turn_idx=999,
+    )
+    out = _fact_to_dict(fact)
+    assert "source_turn" not in out
+    assert "source_turn_idx" not in out
+
+
+def test_memory_recall_range_facts_match_helper_shape(repo_root):
+    """memory_recall_range 的每条 fact 应满足 _fact_to_dict 4 键契约 + 类型正确。
+
+    这是端到端锁定: helper 改动 / 调用点改动若破坏契约, 此测试立刻 fail。
+    """
+    from xragent.memory.manager import MemoryManager
+
+    m = MemoryManager()
+    m.save_fact("contract", "alpha entry")
+    m.save_fact("contract", "beta entry")
+
+    out = memory_recall_range(category="contract")
+    assert out["count"] >= 2
+    for f in out["facts"]:
+        # 键集严格等于
+        assert set(f.keys()) == {"id", "ts", "category", "content"}
+        # 类型锁定 (JSON-able: int / float / str, 无 datetime / Path 等)
+        assert isinstance(f["id"], int)
+        assert isinstance(f["ts"], float)
+        assert isinstance(f["category"], str)
+        assert isinstance(f["content"], str)
+        assert f["category"] == "contract"
+
+
+def test_memory_recall_facts_match_helper_shape(repo_root):
+    """memory_recall (关键词 LIKE 路径) 的 fact 也应满足 _fact_to_dict 契约。
+
+    两个工具共享 helper, 两边都锁: 未来若有人"优化"某一处把 helper 内联回去,
+    此测试立刻 fail 提醒同步。
+    """
+    from xragent.memory.manager import MemoryManager
+
+    m = MemoryManager()
+    m.save_fact("note", "XR agent loves type hints")
+
+    out = memory_recall(query="XR agent")
+    assert out["ok"] is True
+    assert out["count"] >= 1
+    for f in out["facts"]:
+        assert set(f.keys()) == {"id", "ts", "category", "content"}
+        assert isinstance(f["id"], int)
+        assert isinstance(f["ts"], float)
+        assert isinstance(f["category"], str)
+        assert isinstance(f["content"], str)
