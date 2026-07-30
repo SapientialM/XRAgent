@@ -1,9 +1,10 @@
 """MemoryManager：短期消息 + 长期 SQLite 事实。"""
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..config.settings import get_settings
@@ -25,6 +26,11 @@ class Fact:
     # 与 source_turn_idx 同样是末尾 + 默认值, 老代码构造 5 字段不受影响。
     # 默认 0 表示"未标重要级", recall_high_priority 默认 min_priority=1 过滤掉。
     priority: int = 0
+    # 5.4: 新增字段，对应 DB 列 tags (TEXT, JSON 数组字符串)。
+    # 与 category (单一分类) 互补: category 走主分类轴 (preference/history),
+    # tags 走横向主题轴 (python/typed/cli)。list[str] 比单 category 表达力强。
+    # 末尾 + 默认空 list, 老代码构造不受影响。
+    tags: list[str] = field(default_factory=list)
 
 
 class MemoryManager:
@@ -74,6 +80,37 @@ class MemoryManager:
     #       b) priority DESC + ts DESC 已是索引顺序, ORDER BY 零成本
     #       c) LIMIT 提前结束扫描
     #   - 单列 idx_facts_priority 不够: WHERE category=? 仍要 row filter
+
+    # === Schema 版本: 5.3 → 5.4 ===
+    # 变更:
+    #   1. facts 表新增列 tags TEXT (JSON 数组字符串, 默认 '[]')
+    #   2. 新增索引 idx_facts_tags ON facts(tags)
+    #   3. 新增方法 recall_by_tag(tag, k) -> list[Fact]
+    #   4. Fact dataclass 末尾新增 tags: list[str] = field(default_factory=list)
+    #   5. save_fact() 新参数 tags: list[str] | None = None
+    # 用途:
+    #   - category 是单分类 (preference/history), tags 是多标签横向主题
+    #     (python/typed/cli)。同一 fact 可同时跨多主题被召回。
+    #   - recall_by_tag("python") 可一次性跨 category 拉所有相关 fact,
+    #     这是单 category 索引做不到的
+    # 设计选择: 为什么 tags 存 JSON 字符串而不是单独 tags 表?
+    #   - 单独 tags 表需要 (fact_id, tag) JOIN, 写路径加 1 次 INSERT
+    #   - recall_by_tag 单查路径, 不需要聚合 / 排序 by tag
+    #   - JSON 字符串 LIKE 配引号包裹精确匹配: WHERE tags LIKE '%"tag"%'
+    #     走 idx_facts_tags 索引 (B-tree on TEXT), 不会误匹配子串
+    #     (例: 查 "py" 不会匹配 '["python"]', 因为 'python' 前后是引号)
+    # 向后兼容:
+    #   - 新列 nullable + DEFAULT '[]'; 老行 ALTER 后回填 tags='[]'
+    #   - save_fact() 新参数 tags 默认 None (→ 存 '[]'), 老调用零影响
+    #   - _row_to_fact 多读 row[7], 反序列化失败回退 [] (不抛, 不阻塞 recall)
+    # 索引选择:
+    #   - idx_facts_tags 单列 B-tree; LIKE '%"x"%' 实际是 "前导% + 精确 + 后缀"
+    #     的常见模式, SQLite LIKE 优化在尾缀为常量时仍可走索引
+    #     (见 https://sqlite.org/optoverview.html#like_optimization)。
+    #     小数据集上退化为全表扫也可接受, 因为 fact 表预期 < 10k 行。
+    #   - 不建 (category, tags) 复合: recall_by_tag 不需要 category 协同过滤,
+    #     当前用例都是"跨 category 找主题"
+
     BASE_SCHEMA = """
     CREATE TABLE IF NOT EXISTS facts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,7 +119,8 @@ class MemoryManager:
       content TEXT NOT NULL,
       source_turn TEXT,
       source_turn_idx INTEGER,
-      priority INTEGER NOT NULL DEFAULT 0
+      priority INTEGER NOT NULL DEFAULT 0,
+      tags TEXT DEFAULT '[]'
     );
     """
 
@@ -92,6 +130,7 @@ class MemoryManager:
     CREATE INDEX IF NOT EXISTS idx_facts_source_turn ON facts(source_turn);
     CREATE INDEX IF NOT EXISTS idx_facts_source_turn_idx ON facts(source_turn_idx);
     CREATE INDEX IF NOT EXISTS idx_facts_category_priority_ts ON facts(category, priority DESC, ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_facts_tags ON facts(tags);
     """
 
     # 兼容旧引用 (任何外部代码读 SCHEMA 仍可拿到完整脚本)
@@ -113,13 +152,37 @@ class MemoryManager:
     # 5. (category, priority DESC, ts DESC): 5.3 新增, 配合 recall_high_priority。
     #    是 idx_facts_category_ts 的"超集" (priority 永远追加在 ts 前), 但因为
     #    排序不同 (priority DESC vs ts DESC), 不能复用, 必须独立索引。
-    # 6. Old single-column idx_facts_category is a prefix of the composite and is
+    # 6. (tags): 5.4 新增, 配合 recall_by_tag()。LIKE '%"tag"%' 在 SQLite
+    #    走索引的优化路径需要 LIKE 后缀为常量; 小数据集退化为全表扫可接受。
+    # 7. Old single-column idx_facts_category is a prefix of the composite and is
     #    therefore redundant; existing DBs may still carry it (harmless).
 
     # SELECT 投影顺序约定：所有 SELECT 都要按这个 tuple 顺序输出, _row_to_fact 才能
     # 用 fixed indices 还原 Fact。新加列必须追加在末尾 + 同步更新本约定。
     # 5.3: 末尾追加 priority。
-    _FACT_COLUMNS = ("id", "ts", "category", "content", "source_turn", "source_turn_idx", "priority")
+    # 5.4: 末尾追加 tags (JSON 字符串, 反序列化为 list[str])。
+    _FACT_COLUMNS = ("id", "ts", "category", "content", "source_turn", "source_turn_idx", "priority", "tags")
+
+    @staticmethod
+    def _decode_tags(raw: str | None) -> list[str]:
+        """DB tags TEXT → list[str]。失败回退 [], 不抛 (recall 路径稳定优先)。"""
+        if not raw:
+            return []
+        try:
+            v = json.loads(raw)
+            return [str(x) for x in v] if isinstance(v, list) else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @staticmethod
+    def _encode_tags(tags: list[str] | None) -> str:
+        """list[str] → DB tags TEXT。None → '[]'。JSON 失败回退 '[]'。"""
+        if tags is None:
+            return "[]"
+        try:
+            return json.dumps(list(tags), ensure_ascii=False)
+        except (TypeError, ValueError):
+            return "[]"
 
     @staticmethod
     def _row_to_fact(row: tuple) -> Fact:
@@ -128,6 +191,7 @@ class MemoryManager:
         抽到此处前 4 个召回方法 (recall/recall_range/recall_by_turn_idx/recent) 各写
         一份 7 行 ``Fact(id=r[0], ts=r[1], ...)``, 加列时容易漏一处; 集中后只改一处。
         5.3: 末尾多读 row[6] = priority。
+        5.4: 末尾多读 row[7] = tags (JSON 字符串, 反序列化为 list[str])。
         """
         return Fact(
             id=row[0],
@@ -137,6 +201,7 @@ class MemoryManager:
             source_turn=row[4],
             source_turn_idx=row[5],
             priority=row[6],
+            tags=MemoryManager._decode_tags(row[7]),
         )
 
     def __init__(self, db_path: Path | None = None):
@@ -155,6 +220,7 @@ class MemoryManager:
         self._conn.executescript(self.BASE_SCHEMA)
         self._migrate_v51()
         self._migrate_v53()
+        self._migrate_v54()
         self._conn.executescript(self.INDEX_SCHEMA)
         self._conn.commit()
 
@@ -194,6 +260,27 @@ class MemoryManager:
         self._conn.execute("UPDATE facts SET priority = 0 WHERE priority IS NULL")
         self._conn.commit()
 
+    def _migrate_v54(self) -> None:
+        """5.3 → 5.4: 为已存在的 facts 表补 tags 列 + 老行回填 '[]'。
+
+        三步:
+          1. PRAGMA table_info 探列; 已存在直接 return (幂等)
+          2. ALTER TABLE ADD COLUMN tags TEXT DEFAULT '[]'
+          3. UPDATE facts SET tags = '[]' WHERE tags IS NULL  (老行回填)
+
+        与 _migrate_v53 同款保险: SQLite 3.31.0+ 自动回填 DEFAULT, 早于此版本
+        老行实际为 NULL。recall_by_tag 走 LIKE '%"x"%', NULL 不匹配是正确语义。
+        """
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(facts)").fetchall()]
+        if "tags" in cols:
+            return
+        self._conn.execute(
+            "ALTER TABLE facts ADD COLUMN tags TEXT DEFAULT '[]'"
+        )
+        # 老行回填 (兼容 pre-3.31 SQLite)
+        self._conn.execute("UPDATE facts SET tags = '[]' WHERE tags IS NULL")
+        self._conn.commit()
+
     def save_fact(
         self,
         category: str,
@@ -201,6 +288,7 @@ class MemoryManager:
         source_turn: str = "",
         source_turn_idx: int | None = None,
         priority: int = 0,
+        tags: list[str] | None = None,
     ) -> Fact:
         """插入一条 fact, 返回刚插入的 Fact 对象 (含 db 自增 id 与 ts)。
 
@@ -208,12 +296,14 @@ class MemoryManager:
           - 老调用方关心 id: 改用 .id
           - 顺便拿到 ts / category / content, 不必再 recall 一次
         5.3: 新参数 priority: int = 0, 老调用零影响。
+        5.4: 新参数 tags: list[str] | None = None, 序列化后存 tags TEXT。
         """
         ts = time.time()
+        tags_json = self._encode_tags(tags)
         cur = self._conn.execute(
-            "INSERT INTO facts (ts, category, content, source_turn, source_turn_idx, priority) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (ts, category, content, source_turn, source_turn_idx, priority),
+            "INSERT INTO facts (ts, category, content, source_turn, source_turn_idx, priority, tags) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ts, category, content, source_turn, source_turn_idx, priority, tags_json),
         )
         self._conn.commit()
         new_id = cur.lastrowid or 0
@@ -225,11 +315,12 @@ class MemoryManager:
             source_turn=source_turn,
             source_turn_idx=source_turn_idx,
             priority=priority,
+            tags=list(tags) if tags else [],
         )
 
     def recall(self, query: str, k: int = 5, category: str | None = None) -> list[Fact]:
         sql = (
-            "SELECT id, ts, category, content, source_turn, source_turn_idx, priority "
+            "SELECT id, ts, category, content, source_turn, source_turn_idx, priority, tags "
             "FROM facts"
         )
         clauses = []
@@ -265,7 +356,7 @@ class MemoryManager:
         ORDER BY ts DESC 让 LIMIT 提前结束。
         """
         sql = (
-            "SELECT id, ts, category, content, source_turn, source_turn_idx, priority "
+            "SELECT id, ts, category, content, source_turn, source_turn_idx, priority, tags "
             "FROM facts"
         )
         clauses: list[str] = []
@@ -319,7 +410,7 @@ class MemoryManager:
         NULL 的 source_turn_idx 会被过滤 (老行 / 没填的写入)。
         """
         rows = self._conn.execute(
-            "SELECT id, ts, category, content, source_turn, source_turn_idx, priority "
+            "SELECT id, ts, category, content, source_turn, source_turn_idx, priority, tags "
             "FROM facts WHERE source_turn_idx = ? "
             "ORDER BY ts DESC LIMIT ?",
             (turn_idx, k),
@@ -372,7 +463,7 @@ class MemoryManager:
             按 priority DESC, ts DESC 排序的 Fact 列表。
         """
         sql = (
-            "SELECT id, ts, category, content, source_turn, source_turn_idx, priority "
+            "SELECT id, ts, category, content, source_turn, source_turn_idx, priority, tags "
             "FROM facts WHERE priority >= ?"
         )
         params: list = [min_priority]
@@ -384,9 +475,41 @@ class MemoryManager:
         rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_fact(r) for r in rows]
 
+    def recall_by_tag(self, tag: str, k: int = 10) -> list[Fact]:
+        """按 tag 召回 fact。5.4 新方法。
+
+        跨 category 横向召回, 例如 recall_by_tag("python") 同时拉
+        preference/history/note 任何 category 下打了 "python" 标签的 fact。
+
+        查询模式: WHERE tags LIKE '%"tag"%'
+          - JSON 数组里每个元素都有引号包裹, 精确匹配 "python" 不会误匹配
+            "pythonic" 或 "cpython"
+          - 走 idx_facts_tags 索引 (B-tree on TEXT, LIKE 后缀为常量时 SQLite
+            走索引优化路径, 见 https://sqlite.org/optoverview.html#like_optimization)
+          - 顺序按 ts DESC, LIMIT 提前结束
+
+        Args:
+            tag: 单个 tag, 不含引号 (内部加引号)。
+            k: 返回条数, 默认 10。
+
+        Returns:
+            按 ts DESC 排序的 Fact 列表。空 tag 返回 []。
+        """
+        if not tag:
+            return []
+        sql = (
+            "SELECT id, ts, category, content, source_turn, source_turn_idx, priority, tags "
+            "FROM facts WHERE tags LIKE ? "
+            "ORDER BY ts DESC LIMIT ?"
+        )
+        # 引号包裹避免子串误匹配; LIKE pattern 用 ESCAPE 子句没必要因为
+        # 我们控制的字符串 (来自 save_fact 调用方) 不含特殊 LIKE 元字符
+        rows = self._conn.execute(sql, (f'%"{tag}"%', k)).fetchall()
+        return [self._row_to_fact(r) for r in rows]
+
     def recent(self, n: int = 20) -> list[Fact]:
         rows = self._conn.execute(
-            "SELECT id, ts, category, content, source_turn, source_turn_idx, priority "
+            "SELECT id, ts, category, content, source_turn, source_turn_idx, priority, tags "
             "FROM facts ORDER BY ts DESC LIMIT ?",
             (n,),
         ).fetchall()
