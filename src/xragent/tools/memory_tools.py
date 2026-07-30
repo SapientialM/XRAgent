@@ -216,3 +216,49 @@ def memory_recall(
         "count": len(facts),
         "facts": [_fact_to_dict(f) for f in facts],
     }
+
+
+def memory_recall_by_tag(
+    tag: str,
+    k: int = 10,
+) -> dict[str, Any]:
+    """按 tag 跨 category 横向召回 fact (newest first)。
+
+    与三个 category 内 recall 工具互补 —— 本工具回答"打同样 tag 的事有哪些"。
+    走底层 ``MemoryManager.recall_by_tag``, 命中 ``idx_facts_tags`` 索引
+    (LIKE '%"tag"%' 模式), 按 ts DESC 排序。
+
+    Args:
+        tag: 目标 tag (精确匹配 tag 字符串, 大小写敏感)。空字符串 / ``None``
+            时直接返回空结果 (底层 ``recall_by_tag`` 已防御, 避免 LIKE '%%'
+            全表扫; wrapper 层额外检查让 LLM 调用更稳)。
+        k: 最多返回条数, 默认 10。LLM 传 0 / 负数会被夹到 1, 超过 1000
+            会被夹到 1000, 走 :func:`_clip_limit` 统一兜底 (与另外三个
+            recall 工具行为一致)。
+
+    Returns:
+        ``dict[str, Any]``, LLM 工具契约字段:
+            * ``ok`` (bool): 始终 True
+            * ``count`` (int): 实际返回的 fact 数
+            * ``facts`` (list[dict[str, Any]]): 每条含 5 个键 —— ``id`` / ``ts`` /
+              ``category`` / ``content`` / ``tags``。前 4 个走 :func:`_fact_to_dict`
+              (与另外三个 recall 工具形状对齐), ``tags`` 是 ``list[str]`` (本工具
+              特有, 因 tag 是查询键, 把命中的全部 tag 返回给 LLM 让它看到上下文)。
+              字段顺序: id → ts → category → content → tags (后置方便 LLM 解析)。
+    """
+    # tag 空值显式拦截: 防止 LLM 误传空字符串导致 LIKE '%%' 把全库拉出来
+    # (虽然底层 recall_by_tag 也会拦截, 但 wrapper 层早返能省一次 DB 往返)。
+    if not tag:
+        return {"ok": True, "count": 0, "facts": []}
+    m = MemoryManager()
+    # k 兜底走 _clip_limit, 与 memory_recall / memory_recall_range /
+    # memory_top_frequent 行为一致; default=10 与底层 manager 默认对齐。
+    k_eff: int = _clip_limit(k, default=10, lo=_K_LIMIT_MIN, hi=_K_LIMIT_MAX)
+    facts = m.recall_by_tag(tag=tag, k=k_eff)
+    # 走 _fact_to_dict + 追加 tags (不破坏既有 4 字段契约, tags 单独后置)。
+    out: list[dict[str, Any]] = []
+    for f in facts:
+        d = _fact_to_dict(f)
+        d["tags"] = list(f.tags)  # 拷贝, 避免 LLM 拿到 manager 内部引用
+        out.append(d)
+    return {"ok": True, "count": len(facts), "facts": out}

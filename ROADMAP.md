@@ -23,12 +23,16 @@
 - 断网 fallback 到 mock
 - `--list-providers` CLI
 
-## v0.3 — 长期记忆强化（部分 ✅: memory_recall 4f30bbe6; memory_save/range/top_frequent 已上线; 待办: 摘要压缩 hook）
+## v0.3 — 长期记忆强化（部分 ✅: memory_recall 4f30bbe6; memory_recall_range / memory_top_frequent / memory_recall_by_tag 已上线; 待办: 摘要压缩 hook）
 
 - `memory_save` / `memory_recall` 工具上线 ✅ (4f30bbe6)
   - memory_recall: 关键词 LIKE 召回, k clip [1,1000]
   - memory_recall_range: 时间窗口召回
   - memory_top_frequent: 频次 top-N
+- `memory_recall_by_tag` 工具上线 ✅
+  - tag 跨 category 横向召回, 走 idx_facts_tags
+  - k clip [1,1000] + tag 空字符串早返
+  - facts 字段在 4 字段契约上后置 tags (本工具特有)
 - 事实按 category 索引 ✅ (idx_facts_category_ts 5.0)
 - 摘要压缩 hook 启用（Agent 可写自己的压缩策略） — 待办
 

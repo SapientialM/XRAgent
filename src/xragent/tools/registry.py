@@ -117,7 +117,7 @@ class ToolRegistry:
     def run(self, name: str, args: dict[str, Any], gate: Any = None) -> dict[str, Any]:
         """统一执行入口：HITL gate → handler → 异常包络。
 
-        流程：
+        流程:
           1. :meth:`get` 取 :class:`ToolDef`（未知工具抛 KeyError）；
           2. :func:`_apply_hitl` 决定 ``args`` / ``approved`` / ``rejected``；
           3. 若 ``rejected`` 非 None，直接返回 ``{"ok": False, "blocked_by": "hitl", "reason": ...}``；
@@ -150,7 +150,8 @@ def build_default_registry() -> ToolRegistry:
 
     注册表（按风险级别）：
       * low: read_file / list_dir / memory_save / memory_recall /
-        memory_recall_range / memory_top_frequent / diary_write
+        memory_recall_range / memory_top_frequent / memory_recall_by_tag /
+        diary_write
       * medium: curl_url / web_search
       * high: write_file / run_cmd / git_commit / git_push /
         propose_self_replace / terminate（需 HITL 审批）
@@ -204,7 +205,7 @@ def build_default_registry() -> ToolRegistry:
             "timeout_s": {"type": "number", "default": 30, "description": "push 超时秒数；None / 非正数 / 非数值 → 默认 30s"},
         }},
         "high", git_tools.git_push)
-    add("memory_save", "向长期记忆写入一条事实（SQLite）。",
+    add("memory_save", "向长期记忆写入一条 fact（SQLite）。",
         {"type": "object", "properties": {"category": {"type": "string"}, "content": {"type": "string"}}, "required": ["category", "content"]},
         "low", memory_tools.memory_save)
     add("memory_recall", "关键词 LIKE 召回 fact (newest first)，回答我说过什么关于 X 的事。query 空时退化为全量最新 k 条。",
@@ -229,6 +230,12 @@ def build_default_registry() -> ToolRegistry:
             "min_count": {"type": "integer", "default": 2},
         }},
         "low", memory_tools.memory_top_frequent)
+    add("memory_recall_by_tag", "按 tag 跨 category 横向召回 fact (newest first)，tag 空时返回空。",
+        {"type": "object", "properties": {
+            "tag": {"type": "string", "description": "目标 tag 字符串；空字符串会被 wrapper 拦截, 直接返回空结果"},
+            "k": {"type": "integer", "default": 10, "description": "最多返回条数; clip 到 [1, 1000]"},
+        }, "required": ["tag"]},
+        "low", memory_tools.memory_recall_by_tag)
     add("diary_write", "向 diary/YYYY-MM-DD.md 追加一段（人类可读）。",
         {"type": "object", "properties": {"title": {"type": "string"}, "body": {"type": "string"}}, "required": ["title", "body"]},
         "low", diary_tools.diary_write)
