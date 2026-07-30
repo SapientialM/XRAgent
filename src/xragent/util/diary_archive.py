@@ -43,6 +43,16 @@ _DAILY_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})\.md$")
 _ARCHIVE_NAME_RE = re.compile(r"^(\d{4})-W(\d{2})\.md$")
 
 
+def _monday_of(d: dt.date) -> dt.date:
+    """返回 d 所在 ISO 周的周一(以 date.weekday()=0 为基准)。
+
+    原代码在 ``_within_weeks_threshold`` 和 ``auto_archive`` 两处都 inline
+    ``d - dt.timedelta(days=d.weekday())``；抽到这里去重后,这两处只需
+    ``_monday_of(today)`` / ``_monday_of(mtime)``,意图也更直白。
+    """
+    return d - dt.timedelta(days=d.weekday())
+
+
 def _today_iso() -> tuple[int, int]:
     """返回 (iso_year, iso_week) of today."""
     y, w, _ = dt.date.today().isocalendar()
@@ -62,8 +72,7 @@ def _within_weeks_threshold(today: dt.date, file_monday: dt.date, weeks_threshol
     weeks_threshold=2 时：今天所在周、上周、上上周都保留;更早的周会被归档。
     实现：delta_weeks = (today_monday - file_monday) / 7 天;若 <= weeks_threshold 则保留。
     """
-    today_monday = today - dt.timedelta(days=today.weekday())
-    delta_days = (today_monday - file_monday).days
+    delta_days = (_monday_of(today) - file_monday).days
     return 0 <= delta_days <= weeks_threshold * 7
 
 
@@ -194,21 +203,15 @@ def auto_archive(diary_dir: Path, weeks_threshold: int = 2) -> dict:
             continue
         # 文件名 vs mtime: 优先用 mtime 决定"是不是阈值内的周"。
         # 这样即使 daily 文件名是今天的、但 mtime 显示是上周落地的,也会按 mtime 归档。
+        # stat + isocalendar 合并到一个 try,任一异常走同一档 reason。
         try:
-            stat = entry.stat()
-            mtime = dt.date.fromtimestamp(stat.st_mtime)
+            mtime = dt.date.fromtimestamp(entry.stat().st_mtime)
+            iso_year, iso_week, _ = mtime.isocalendar()
         except OSError:
             skipped.append({"file": entry.name, "reason": "stat_failed"})
             continue
 
-        try:
-            iso_year, iso_week, _ = mtime.isocalendar()
-        except Exception:  # pragma: no cover - 极少触发
-            skipped.append({"file": entry.name, "reason": "no_iso_week"})
-            continue
-
-        file_monday = mtime - dt.timedelta(days=mtime.weekday())
-        if _within_weeks_threshold(today, file_monday, weeks_threshold):
+        if _within_weeks_threshold(today, _monday_of(mtime), weeks_threshold):
             skipped.append({"file": entry.name, "reason": "in_threshold"})
             continue
 
