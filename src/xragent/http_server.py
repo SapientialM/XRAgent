@@ -24,19 +24,36 @@ HTTP_REPLY_TIMEOUT_S: float = 120.0
 
 
 def register_input_queue(q: "queue.Queue") -> None:
-    """main.py 注册共享输入队列；HTTP /message 直接 put。"""
+    """注册共享输入队列（供 main.py 在启动时调用一次）。
+
+    之后 HTTP ``POST /message`` 会把父母消息 ``put`` 到该队列。
+    模块内只持有引用；生命周期与进程一致，不做 close。
+
+    Args:
+        q: 进程级共享队列，元素为 ``str``（原始父母消息文本）。
+    """
     global _shared_input_queue
     _shared_input_queue = q
 
 
 def register_answer_sink(box: dict) -> None:
-    """main.py 注册 last_answer 容器；HTTP /last-answer 读它。"""
+    """注册最近一次 LLM answer 的容器（供 main.py 在启动时调用一次）。
+
+    ``box`` 形如 ``{"answer": str, "ts": float}``，由 main 在每轮 React 后就地
+    更新；HTTP ``GET /last-answer`` 直接读它（避免跨线程同步问题）。
+
+    Args:
+        box: 可变 dict 容器；key 至少含 ``answer``、``ts``。
+    """
     global _last_answer_box
     _last_answer_box = box
 
 
 def enqueue_message(text: str) -> None:
     """把人类父母消息塞进共享输入队列。
+
+    Args:
+        text: 原始消息文本；调用方应自行 ``strip()``。
 
     Raises:
         RuntimeError: 共享队列还没注册（main.py 没启动）。
@@ -50,7 +67,11 @@ def enqueue_message(text: str) -> None:
 def start_server_background(loop: "ReActLoop") -> None:
     """后台起 HTTP 服务线程（token 鉴权 + 4 个 endpoint）。
 
-    会替换 loop.gate 的 channel 为 HTTP 实现。
+    会把 ``loop.gate`` 的 channel 替换为 :func:`_http_approval_channel`
+    （仅当 gate 是 :class:`HitlGate` 时），实现 HTTP 审批入站。
+
+    Args:
+        loop: 已启动的 :class:`ReActLoop`，用于替换 HITL channel 与保持引用。
     """
     s = get_settings()
     _loop_ref.append(loop)
@@ -66,6 +87,13 @@ def _http_approval_channel(req: Any) -> Any:
     """HTTP 版的审批 channel：从 reply queue 取一次审批结果。
 
     超时 ``HTTP_REPLY_TIMEOUT_S`` 秒；任何异常都返回 REJECT 避免 Agent 卡死。
+
+    Args:
+        req: 审批请求对象；本 channel 不读其字段，仅用作 future 签名兼容。
+
+    Returns:
+        :class:`ApprovalResult`：成功时按 reply 内容构造，超时/异常时
+        返回 ``Decision.REJECT`` 并附带 reason。
     """
     from .hitl.gate import ApprovalResult, Decision
     try:
@@ -84,6 +112,12 @@ def _make_handler(token: str) -> type:
         GET  /health        → runtime_state (pid/heartbeat/restart_count)
         POST /message       → 塞进共享队列
         POST /approve       → 回复 HITL gate 一次
+
+    Args:
+        token: Bearer token；空串表示关闭鉴权（仅供本地 dev）。
+
+    Returns:
+        继承自 :class:`BaseHTTPRequestHandler` 的 handler 类，闭包里已绑定 token。
     """
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:
@@ -110,7 +144,12 @@ def _make_handler(token: str) -> type:
             return False
 
         def _send_json(self, code: int, payload: dict) -> None:
-            """把 payload 序列化为 JSON（UTF-8）并以 application/json 响应。"""
+            """把 payload 序列化为 JSON（UTF-8）并以 application/json 响应。
+
+            Args:
+                code: HTTP 状态码（200/401/404/503…）。
+                payload: 可被 ``json.dumps`` 序列化的 dict；中文以 ``ensure_ascii=False`` 编码。
+            """
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
