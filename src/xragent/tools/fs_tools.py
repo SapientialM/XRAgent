@@ -1,6 +1,7 @@
 """filesystem 工具 (read / list / write)。"""
 from __future__ import annotations
 
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -171,6 +172,12 @@ def list_dir(path: str = ".") -> dict[str, Any]:
     不影响其他条目 (size 退化到 0), 但目录级 iterdir 失败会整体返回
     ``ok=False``。文案前缀 ``"列出失败"`` 让 LLM 立刻定位出错环节。
 
+    性能细节: 每个子条目走 *单次* ``child.stat()`` 同时拿到 ``is_dir``
+    与 ``size``, 比之前 ``child.is_dir()`` + ``child.stat()`` 各一次
+    syscall 少一半 stat 调用 (大目录 / NFS / 容器 fs 下尤其明显);
+    副作用是消除了 ``is_dir()`` 成功但紧跟的 ``stat()`` 失败这种竞态
+    退化路径, OSError 兜底现在只在 *一次* 调用上发生。
+
     Returns:
         ``dict[str, Any]``, LLM 工具契约字段:
             * ``ok`` (bool): True 表示列出成功
@@ -194,10 +201,13 @@ def list_dir(path: str = ".") -> dict[str, Any]:
         if child.name == ".git":
             continue
         rel = child.relative_to(repo_root).as_posix()
-        # 单文件 stat 失败不致命 (permission revoked 后立刻 list), 退化到 size=0
+        # 单次 stat 同时拿 is_dir / size: 避免 ``is_dir()`` + ``stat()`` 两轮 syscall,
+        # 并消除 "is_dir 成功但 stat 失败" 的竞态退化路径。S_ISDIR 直接看 mode 位,
+        # 与 ``Path.is_dir()`` 语义一致 (跟随 symlink)。
         try:
-            is_dir = child.is_dir()
-            size: int = child.stat().st_size if is_dir is False else 0
+            st = child.stat()
+            is_dir: bool = stat.S_ISDIR(st.st_mode)
+            size: int = 0 if is_dir else st.st_size
         except OSError:
             is_dir = False
             size = 0
