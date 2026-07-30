@@ -28,15 +28,27 @@
     ``xragent/turn-*`` 自动 snapshot tag。默认保留天数走 settings.snapshot_retention_days。
     非 git 仓库 / ``max_age_days <= 0`` 静默返回 ``[]``；``dry_run=True`` 仅列候选。
     仅匹配 ``xragent/turn-*`` 前缀,用户手工 tag（如 ``v0.1`` / ``baseline``）不会被误删。
+
+**v0.3.1 refactor**:
+  - `SideGit._run` / `SideGit.push` 改走 ``util.git_helpers.git_run`` / ``git_push``,
+    去掉 inline ``subprocess.run`` 模板 (重复 5+ 行 kwargs)。
+  - 行为契约完全保留: ``_run`` 仍 raise ``RuntimeError``, ``push`` 仍返回 ``(bool, str)``,
+    与 ``test_sidegit.py`` / ``test_subprocess_utils.py`` 锁住的一致。
+  - ``import subprocess`` 保留: 仅为兼容 ``tests/test_git_tools.py`` 里
+    ``monkeypatch.setattr(side_git.subprocess, "run", fake_run)`` 拦截参数透传。
+    ``subprocess.run`` 在 ``run_capture`` 内是动态属性查找, fake_run 跨模块可见,
+    该测试无需修改。
 """
 from __future__ import annotations
 
-import subprocess
+import subprocess  # 仅为测试兼容: tests/test_git_tools.py 通过 side_git.subprocess.run 拦截
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from ..config.settings import get_settings
+from ..util.git_helpers import git_push as _git_push
+from ..util.git_helpers import git_run as _git_run
 
 
 @dataclass
@@ -60,16 +72,8 @@ class SideGit:
         self.settings = s
 
     def _run(self, *args: str, check: bool = True) -> str:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=str(self.root),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
-        if check and result.returncode != 0:
-            raise RuntimeError(f"git {' '.join(args)} 失败: {result.stderr.strip()}")
-        return result.stdout.strip()
+        # v0.3.1: 走 git_helpers.git_run, 统一 ``[git, *args]`` 构造 + RuntimeError 消息格式。
+        return _git_run(list(args), cwd=self.root, check=check)
 
     def is_repo(self) -> bool:
         try:
@@ -311,10 +315,5 @@ class SideGit:
         return removed
 
     def push(self, remote: str = "origin", branch: str = "main") -> tuple[bool, str]:
-        result = subprocess.run(
-            ["git", "push", remote, branch],
-            cwd=str(self.root),
-            capture_output=True,
-            text=True,
-        )
-        return (result.returncode == 0, (result.stderr or result.stdout).strip())
+        # v0.3.1: 走 git_helpers.git_push, 统一 ``(ok, msg)`` 语义 + rc 兜底。
+        return _git_push(cwd=self.root, remote=remote, branch=branch)
