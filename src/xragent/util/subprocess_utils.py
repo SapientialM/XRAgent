@@ -20,21 +20,19 @@ tests/test_git_tools.py 用 ``monkeypatch.setattr(side_git.subprocess, "run", fa
 拦截 git push 参数透传。因为 ``import subprocess`` 拿到的是模块 singleton, 而
 ``subprocess.run`` 在 ``run_capture`` 函数体内是动态属性查找, 所以 fake_run 在
 side_git 和 subprocess_utils 里同时被看到, 现有测试不需要改。
+
+**v0.5 refactor (本轮)**: 删除仅 1 处调用的 ``_to_tuple`` helper, 改为内联 —
+违反"不抽只调用一次的 helper"原则; ``run_capture`` 顶层已经 cover 了"完成
+subprocess 调用并提取三件套"职责, 再抽一层反而割裂语义。净 -3 行。
 """
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 
 
 # ``returncode`` 哨兵: 表示"运行过程本身失败"（timeout / binary 缺失 / OS error）,
 # 而不是 subprocess 自身返回的退出码。调用方可用 ``rc < 0`` 或 ``rc == RC_RUNTIME_FAIL`` 判断。
 RC_RUNTIME_FAIL: int = -1
-
-
-def _to_tuple(result: subprocess.CompletedProcess) -> tuple[int, str, str]:
-    """CompletedProcess → (rc, out, err); stdout/stderr 自动 strip。"""
-    return (result.returncode, result.stdout.strip(), result.stderr.strip())
 
 
 def run_capture(
@@ -77,7 +75,7 @@ def run_capture(
             encoding=encoding,
             timeout=timeout,
         )
-        return _to_tuple(result)
+        return (result.returncode, result.stdout.strip(), result.stderr.strip())
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
         # 吞掉统一异常: 调用方通常想要"git 失败了 → n=0 / 走 fallback", 不要裸崩
         return (RC_RUNTIME_FAIL, "", str(e).strip())
