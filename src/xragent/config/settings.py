@@ -14,6 +14,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # 仓库根 = 本文件向上 3 级（src/xragent/config/settings.py -> xragent/config -> xragent -> repo root）
 REPO_ROOT: Path = Path(__file__).resolve().parents[3]
 
+# 当前 Settings 上"按 provider 命名前缀"的字段集；用于 _provider_attr 统一查找。
+# 新增 provider 时只需：1) 加进 llm_provider Literal；2) 在此声明对应 {provider}_api_key /
+# {provider}_base_url 字段。_provider_attr 不需改。
+_PROVIDERS_WITH_API: tuple[str, ...] = ("openai", "deepseek", "glm", "minimaxi")
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -108,23 +113,26 @@ class Settings(BaseSettings):
     snapshot_retention_days: int = 30
 
     # === derivation ===
+    def _provider_attr(self, suffix: str) -> str:
+        """按 ``llm_provider`` 在 Settings 上查找 ``{provider}_{suffix}`` 字段值。
+
+        例如 ``_provider_attr("api_key")`` 在 ``llm_provider="openai"`` 时返回
+        ``self.openai_api_key``。provider 不在白名单（如 ``mock``/未声明的
+        alias）或对应字段不存在时返回 ``""``，与原 dict-literal ``.get(..., "")``
+        兜底一致。
+        """
+        if self.llm_provider not in _PROVIDERS_WITH_API:
+            return ""
+        attr = f"{self.llm_provider}_{suffix}"
+        return getattr(self, attr, "")
+
     @property
     def active_api_key(self) -> str:
-        return {
-            "openai": self.openai_api_key,
-            "deepseek": self.deepseek_api_key,
-            "glm": self.glm_api_key,
-            "minimaxi": self.minimaxi_api_key,
-        }.get(self.llm_provider, "")
+        return self._provider_attr("api_key")
 
     @property
     def active_base_url(self) -> str:
-        return {
-            "openai": self.openai_base_url,
-            "deepseek": self.deepseek_base_url,
-            "glm": self.glm_base_url,
-            "minimaxi": self.minimaxi_base_url,
-        }.get(self.llm_provider, "")
+        return self._provider_attr("base_url")
 
     @property
     def active_model(self) -> str:
