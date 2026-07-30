@@ -17,6 +17,22 @@ from typing import Any, Callable
 from ..config.settings import get_settings
 
 
+# === _stdin_channel 决策语法 ===
+#
+# 用户在 stdin 上一行输入,首 token 决定决策:
+#   * 命中 _APPROVE_INPUTS -> APPROVE
+#   * 命中 _REJECT_INPUTS  -> REJECT
+#   * 命中 _EDIT_PREFIX    -> EDIT (后续 token 解析为 JSON)
+#   * 其它                 -> REJECT, reason="未识别输入"
+#
+# 空字符串视作"接受默认"——上游 prompt 一般带 [Y/n], 多数用户按回车 = 同意。
+# 抽到模块级 frozenset 后,_stdin_channel 体内只剩 ``line in _APPROVE_INPUTS``
+# 这种一行判断;且后续若有第二个 channel 想共用同一语法,直接 import 即可。
+_APPROVE_INPUTS: frozenset[str] = frozenset({"y", "Y", "yes", "ok", ""})
+_REJECT_INPUTS: frozenset[str] = frozenset({"n", "N", "no"})
+_EDIT_PREFIX: str = "e:"
+
+
 class Decision(enum.Enum):
     """HITL 审批的三种可能结果。
 
@@ -138,12 +154,13 @@ class HitlGate:
     def _stdin_channel(self, req: ApprovalRequest) -> ApprovalResult:
         """内置 channel：往 stderr 写 prompt，从 stdin 读一行解析。
 
-        解析规则：
-          * ``y`` / ``Y`` / ``yes`` / ``ok`` / 空行 → APPROVE
-            （空行视作"接受默认"，因为上游 prompt 一般会带 ``[Y/n]``）。
-          * ``n`` / ``N`` / ``no`` → REJECT（reason 留空）。
-          * ``e:<json>`` → EDIT，``edited_args`` 是解析后的对象；
-            JSON 解析失败 → REJECT，reason 携带错误细节。
+        解析规则（见模块顶 ``_APPROVE_INPUTS`` / ``_REJECT_INPUTS`` /
+        ``_EDIT_PREFIX``）:
+          * 命中 ``_APPROVE_INPUTS``（``y`` / ``Y`` / ``yes`` / ``ok`` / 空行）
+            → APPROVE（空行视作"接受默认"，上游 prompt 一般带 ``[Y/n]``）。
+          * 命中 ``_REJECT_INPUTS``（``n`` / ``N`` / ``no``）→ REJECT（reason 留空）。
+          * 命中 ``_EDIT_PREFIX``（``e:<json>``）→ EDIT，``edited_args`` 是
+            解析后的对象；JSON 解析失败 → REJECT，reason 携带错误细节。
           * 其它输入 → REJECT，reason="未识别输入"。
 
         ``EOFError``（stdin 被关了，例如 CI 里没 tty）→ REJECT，
@@ -156,13 +173,13 @@ class HitlGate:
         except EOFError:
             return ApprovalResult(Decision.REJECT, reason="stdin EOF")
         line = line.strip()
-        if line in ("y", "Y", "yes", "ok", ""):
+        if line in _APPROVE_INPUTS:
             return ApprovalResult(Decision.APPROVE)
-        if line in ("n", "N", "no"):
+        if line in _REJECT_INPUTS:
             return ApprovalResult(Decision.REJECT)
-        if line.startswith("e:"):
+        if line.startswith(_EDIT_PREFIX):
             try:
-                edited = json.loads(line[2:].strip())
+                edited = json.loads(line[len(_EDIT_PREFIX):].strip())
                 return ApprovalResult(Decision.EDIT, edited_args=edited)
             except json.JSONDecodeError as e:
                 return ApprovalResult(Decision.REJECT, reason=f"edit 解析失败: {e}")
