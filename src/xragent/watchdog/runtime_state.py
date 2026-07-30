@@ -19,6 +19,18 @@ def _path() -> Path:
     return get_settings().runtime_state_path
 
 
+def _coerce_int(value: Any, default: int) -> int:
+    """把任意值强转 ``int``；失败（``TypeError`` / ``ValueError``）回退 ``default``。
+
+    与裸 ``int(value)`` 的区别：把"键存在但值为 ``None``"或"非数字字符串"这类
+    边界统一收敛到 ``default``，避免调用方再写 try/except。
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def read() -> dict[str, Any]:
     """读取运行时状态。
 
@@ -94,21 +106,22 @@ def restart_count() -> int:
     """读取累计重启次数。
 
     Returns:
-        int: ``state["restart_count"]``；缺键返回 0，非整数经 ``int()`` 强转。
+        int: ``state["restart_count"]``；缺键返回 0，非整数经 ``_coerce_int``
+            强转（含 ``None`` / 非数字字符串回退到 0）。
     """
-    return int(read().get("restart_count", 0))
+    return _coerce_int(read().get("restart_count", 0), 0)
 
 
 def bump_restart() -> int:
     """递增重启计数并写回。
 
-    缺键时从 0 起跳；已有值则 ``+1``。其它字段（``heartbeat_ts`` / ``pid`` 等）
-    不受影响。
+    缺键或值为 ``None`` 时从 0 起跳；已有值则 ``+1``。其它字段
+    （``heartbeat_ts`` / ``pid`` 等）不受影响。
 
     Returns:
         int: 递增后的新值。
     """
     state = read()
-    state["restart_count"] = int(state.get("restart_count", 0)) + 1
+    state["restart_count"] = _coerce_int(state.get("restart_count"), 0) + 1
     write(state)
     return state["restart_count"]
