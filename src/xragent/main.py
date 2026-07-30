@@ -34,6 +34,22 @@ def _print_hello() -> None:
     print("=" * 60)
 
 
+def _apply_freeze(freeze: bool) -> None:
+    """``--freeze`` / ``freeze=True`` 的副作用：禁 evolution 并重置 settings 缓存。
+
+    把 ``os.environ[XRAGENT_EVOLUTION_ENABLED] = "false"`` + ``reset_settings_cache()``
+    这两行从 :func:`cmd_once` / :func:`cmd_interactive` / :func:`main` 三处抽出。
+
+    Args:
+        freeze: True 时设环境变量 + 清缓存，让刚启动的子进程按"关 evolution"
+            行为跑（便于 CI 断言 answer）。False 时 no-op。
+    """
+    if not freeze:
+        return
+    os.environ["XRAGENT_EVOLUTION_ENABLED"] = "false"
+    reset_settings_cache()
+
+
 def cmd_smoke() -> int:
     """最小烟雾测试：MockBackend + ReActLoop 跑一次自检 prompt。
 
@@ -64,9 +80,7 @@ def cmd_once(text: str, freeze: bool) -> int:
     Returns:
         0 = 成功；1 = ``error`` 字段非空。
     """
-    if freeze:
-        os.environ["XRAGENT_EVOLUTION_ENABLED"] = "false"
-        reset_settings_cache()
+    _apply_freeze(freeze)
     out = ReActLoop(on_heartbeat=rs.heartbeat).run(text)
     print(out["answer"])
     return 0 if not out["error"] else 1
@@ -85,9 +99,7 @@ def cmd_interactive(freeze: bool, with_http: bool = False) -> int:
     Returns:
         0 = 正常退出（``/quit`` / EOF / SIGINT）；从不返回非零。
     """
-    if freeze:
-        os.environ["XRAGENT_EVOLUTION_ENABLED"] = "false"
-        reset_settings_cache()
+    _apply_freeze(freeze)
     _print_hello()
     # autonomous 模式不打 turn tag（30s 一轮会刷屏 2000+/天）；只保留 stash 供 rollback
     loop = ReActLoop(on_heartbeat=rs.heartbeat, max_steps=40, tag_snapshots=False)
@@ -429,9 +441,7 @@ def main() -> int:
     parser.add_argument("--freeze", action="store_true")
     args = parser.parse_args()
 
-    if args.freeze:
-        os.environ["XRAGENT_EVOLUTION_ENABLED"] = "false"
-        reset_settings_cache()
+    _apply_freeze(args.freeze)
 
     if args.smoke:
         return cmd_smoke()
