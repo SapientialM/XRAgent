@@ -47,12 +47,15 @@ def iter_jsonl(
     """
     if not path.exists():
         return
+    # 循环不变式：把 "max_lines 是否生效" 提到循环外一次算好，热路径只剩一次比较。
+    # 之前每行都重算 ``max_lines is not None and max_lines > 0``，N 行 = N×2 次 is/is 比较。
+    has_limit = max_lines is not None and max_lines > 0
     # 懒迭代：with open() + for line in f，逐行从内核 buffer 读，
     # 避免 read_text().splitlines() 预建整文件 lines 列表的内存开销。
     # encoding="utf-8-sig" 自动处理首行 BOM（边界条件）；纯 utf-8 文件不受影响。
     with path.open("r", encoding="utf-8-sig") as f:
         for i, line in enumerate(f):
-            if max_lines is not None and max_lines > 0 and i >= max_lines:
+            if has_limit and i >= max_lines:
                 # 早返：避免把整文件读完才发现"我只要前 N 条"。
                 # i 是已 yield 数（含被跳过的坏行/空行），但调用方关心的是
                 # "最多 yield 多少个有效 rec"，用 i 偏紧一格是安全的（不会多 yield）。
