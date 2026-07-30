@@ -61,15 +61,36 @@ def _apply_hitl(name: str, td: ToolDef, args: dict[str, Any], gate: Any) -> _Hit
 
 
 class ToolRegistry:
-    def __init__(self):
+    """工具注册中心 —— ``ToolDef`` 的 dict 容器 + HITL gate 调度。
+
+    通过 :meth:`register` / :meth:`unregister` 维护 ``self._tools``；
+    :meth:`run` 是统一的执行入口，先走 :func:`_apply_hitl` 再调 handler，
+    handler 异常统一包成 ``{"ok": False, "error": ...}`` envelope。
+    """
+
+    def __init__(self) -> None:
+        """初始化空的 ``self._tools: dict[str, ToolDef]``。"""
         self._tools: dict[str, ToolDef] = {}
 
     def register(self, t: ToolDef) -> None:
+        """注册一个 :class:`ToolDef`。
+
+        Args:
+            t: 工具定义；``t.name`` 必须唯一。
+
+        Raises:
+            ValueError: ``t.name`` 已注册（避免静默覆盖）。
+        """
         if t.name in self._tools:
             raise ValueError(f"重复注册: {t.name}")
         self._tools[t.name] = t
 
     def unregister(self, name: str) -> None:
+        """注销一个工具；不存在则静默 no-op（与 :meth:`dict.pop` 默认行为一致）。
+
+        Args:
+            name: 工具名。
+        """
         self._tools.pop(name, None)
 
     def get(self, name: str) -> ToolDef:
@@ -78,15 +99,39 @@ class ToolRegistry:
         return self._tools[t.name]
 
     def names(self) -> list[str]:
+        """已注册的工具名列表（插入序；新 list，不暴露内部 dict）。"""
         return list(self._tools.keys())
 
     def specs(self) -> list[ToolSpec]:
+        """把已注册工具转成 :class:`ToolSpec` 列表（用于 LLM function-calling 描述）。
+
+        Returns:
+            list[ToolSpec]: ``name``/``description``/``input_schema``/``risk`` 四元组；
+            不含 handler（不暴露代码给外部）。
+        """
         return [
             ToolSpec(name=t.name, description=t.description, input_schema=t.input_schema, risk=t.risk)
             for t in self._tools.values()
         ]
 
-    def run(self, name: str, args: dict[str, Any], gate=None) -> dict[str, Any]:
+    def run(self, name: str, args: dict[str, Any], gate: Any = None) -> dict[str, Any]:
+        """统一执行入口：HITL gate → handler → 异常包络。
+
+        流程：
+          1. :meth:`get` 取 :class:`ToolDef`（未知工具抛 KeyError）；
+          2. :func:`_apply_hitl` 决定 ``args`` / ``approved`` / ``rejected``；
+          3. 若 ``rejected`` 非 None，直接返回 ``{"ok": False, "blocked_by": "hitl", "reason": ...}``；
+          4. 否则 ``td.handler(**args)``；任何异常包成 ``{"ok": False, "error": ...}``；
+          5. 若 ``approved``，在结果 dict 上加 ``hitl_approved: True``。
+
+        Args:
+            name: 工具名。
+            args: 透传给 handler 的 kwargs；HITL EDIT 时会被替换。
+            gate: HITL gate；callable 或有 ``.request(req)`` 方法的对象；None 跳过审批（仅 low/medium）。
+
+        Returns:
+            dict[str, Any]: handler 返回值或包络；``ok`` 键必有。
+        """
         td = self.get(name)
         outcome = _apply_hitl(name, td, args, gate)
         if outcome.rejected is not None:
@@ -101,12 +146,36 @@ class ToolRegistry:
 
 
 def build_default_registry() -> ToolRegistry:
+    """构造默认 :class:`ToolRegistry`，注册所有内置工具。
+
+    注册表（按风险级别）：
+      * low: read_file / list_dir / memory_save / memory_recall /
+        memory_recall_range / memory_top_frequent / diary_write
+      * medium: curl_url / web_search
+      * high: write_file / run_cmd / git_commit / git_push /
+        propose_self_replace / terminate（需 HITL 审批）
+
+    若 :attr:`Settings.evolution_enabled` 为 False，自动 ``unregister`` 掉
+    ``propose_self_replace`` 与 ``terminate``（避免自进化通道被误用）。
+
+    Returns:
+        ToolRegistry: 全新实例；调用方可继续 :meth:`ToolRegistry.register` / :meth:`ToolRegistry.unregister`。
+    """
     from . import fs_tools, exec_tools, git_tools, memory_tools, diary_tools, evolve_tools
     from ..config.settings import get_settings
 
     r = ToolRegistry()
 
-    def add(name, desc, schema, risk, fn):
+    def add(name: str, desc: str, schema: dict[str, Any], risk: str, fn: Callable[..., dict[str, Any]]) -> None:
+        """便捷注册助手 —— 语法糖：构造 :class:`ToolDef` 并 register。
+
+        Args:
+            name: 工具名。
+            desc: LLM 可见的人类描述。
+            schema: JSON Schema for tool args。
+            risk: ``"low"`` / ``"medium"`` / ``"high"``，决定 HITL 是否拦截。
+            fn: 实际 handler；返回 ``dict[str, Any]`` envelope。
+        """
         r.register(ToolDef(name=name, description=desc, input_schema=schema, risk=risk, handler=fn))
 
     add("read_file", "读取仓库内文本文件，可选 max_bytes 截断（仅返回首 N 字节；超出时 truncated=True）。",
