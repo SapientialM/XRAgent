@@ -21,6 +21,17 @@ from ..config import (
 
 
 def _resolve(path: str) -> Path:
+    """把任意 path 解析为绝对路径，并校验其仍在仓库根之内。
+
+    Args:
+        path: 相对或绝对路径字符串。
+
+    Returns:
+        Path: ``Path(path).resolve()`` 结果。
+
+    Raises:
+        PermissionError: 解析后路径不在 ``_REPO_ROOT`` 子树内（防逃逸）。
+    """
     p = Path(path).resolve()
     root = _REPO_ROOT.resolve()
     if root not in p.parents and p != root:
@@ -29,6 +40,15 @@ def _resolve(path: str) -> Path:
 
 
 def _hitl_approved() -> bool:
+    """检测当前进程是否被 HITL 父级放行。
+
+    Reads:
+        环境变量 ``HITL_APPROVED`` —— 等于 ``"1"`` 时返回 True（其余值/缺失均 False）。
+
+    Returns:
+        bool: 是否已审批；用于 :func:`run_cmd` / :func:`git_commit` / :func:`git_push` /
+        :func:`curl_url` / :func:`terminate` 等高危操作的硬门槛。
+    """
     return os.environ.get("HITL_APPROVED") == "1"
 
 
