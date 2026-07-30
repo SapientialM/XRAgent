@@ -25,10 +25,32 @@ class PathSandbox:
     root: Path
 
     @classmethod
-    def from_settings(cls) -> "PathSandbox":
+    def from_settings(cls) -> PathSandbox:
+        """从全局 ``get_settings()`` 构造一个 ``PathSandbox`` 实例。
+
+        ``root`` 取自 ``settings.repo_root``（仓库根），所有后续 ``resolve`` /
+        ``assert_inside`` / ``assert_writable`` 都以此为围栏基准。
+
+        Returns:
+            PathSandbox: ``root == settings.repo_root`` 的新实例（frozen）。
+        """
         return cls(root=get_settings().repo_root)
 
     def resolve(self, raw: str | Path) -> Path:
+        """把 ``raw`` 解析成以 ``self.root`` 为基准的绝对路径。
+
+        行为细节：
+          * 相对路径 → 先 ``self.root / raw`` 再 ``.resolve()``；
+          * 绝对路径 → 直接 ``.resolve()``（不会绕回 ``self.root``）；
+          * ``..`` 与符号链接会被 ``Path.resolve()`` 规范化；
+          * 返回值 ``Path`` 不保证磁盘上已存在（仅做字符串 / symlink 解析）。
+
+        Args:
+            raw: 原始路径；接受 ``str`` 或任何 ``os.PathLike``（如 ``Path``）。
+
+        Returns:
+            Path: 规范化后的绝对路径（``is_absolute()`` 为 True）。
+        """
         p = Path(raw)
         if not p.is_absolute():
             p = self.root / p
