@@ -20,6 +20,7 @@ from .core.react_loop import ReActLoop
 from .hitl.gate import HitlGate
 from .memory.manager import MemoryManager
 from .tools.registry import build_default_registry
+from .util.heartbeat import start_heartbeat_thread
 from .util.subprocess_utils import run_capture
 from .watchdog import runtime_state as rs
 
@@ -115,18 +116,10 @@ def cmd_interactive(freeze: bool, with_http: bool = False) -> int:
         start_server_background(loop)
         print(f"[serve] HTTP on http://{s.http_host}:{s.http_port}/")
 
-    def heartbeat_worker() -> None:
-        """后台心跳线程：每 ``heartbeat_interval_s`` 调一次 ``rs.heartbeat()``。
-
-        异常一律吞掉；只通过 ``stop_event`` 优雅退出。
-        """
-        while not stop_event.is_set():
-            try:
-                rs.heartbeat()
-            except Exception:
-                pass
-            stop_event.wait(s.heartbeat_interval_s)
-    threading.Thread(target=heartbeat_worker, daemon=True).start()
+    # 后台心跳线程：每 ``heartbeat_interval_s`` 调一次 ``rs.heartbeat()``。
+    # 异常一律吞掉；只通过 ``stop_event`` 优雅退出。原 inline 实现见 git history
+    # （def heartbeat_worker + Thread.start()），抽到 ``util.heartbeat`` 后只剩一行。
+    start_heartbeat_thread(stop_event.is_set, s.heartbeat_interval_s, name="xragent-heartbeat-repl")
 
     def stdin_reader() -> None:
         """后台 stdin 读取线程：把 ``input()`` 结果塞进 ``input_queue``。
@@ -288,20 +281,11 @@ def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
 
     threading.Thread(target=_parent_consumer, daemon=True).start()
 
-    # 异步 heartbeat 线程：每 5s 写一次（即使 LLM 调用 30s+ supervisor 也不误判超时）
-    def _heartbeat_loop() -> None:
-        """后台 5s 节拍心跳；保证 supervisor 不超时（autonomous round 可能拉到 30s+）。
-
-        与 :func:`heartbeat_worker` 不同：本函数写死 5s 间隔。
-        """
-        while not stop["v"]:
-            try:
-                rs.heartbeat()
-            except Exception:
-                pass
-            if not stop["v"]:
-                threading.Event().wait(5)
-    threading.Thread(target=_heartbeat_loop, daemon=True).start()
+    # 异步 heartbeat 线程：每 5s 写一次（即使 LLM 调用 30s+ supervisor 也不误判超时）。
+    # 与 :func:`cmd_interactive` 的心跳共用 ``start_heartbeat_thread``；停止条件用
+    # ``stop["v"]``（autonomous 的 SIGTERM 旗标），间隔写死 5s——原 inline 实现见
+    # git history（def _heartbeat_loop + Thread.start()）。
+    start_heartbeat_thread(lambda: stop["v"], interval_s=5, name="xragent-heartbeat-autonomous")
 
     # autonomous 模式不打 turn tag（30s 一轮会刷屏 2000+/天）；只保留 stash 供 rollback
     loop = ReActLoop(on_heartbeat=rs.heartbeat, max_steps=40, tag_snapshots=False)
