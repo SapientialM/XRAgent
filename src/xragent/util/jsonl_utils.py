@@ -21,11 +21,17 @@ from typing import Any, Iterator
 from .json_utils import safe_json_loads
 
 
-def iter_jsonl(path: Path) -> Iterator[Any]:
+def iter_jsonl(
+    path: Path,
+    max_lines: int | None = None,
+) -> Iterator[Any]:
     """逐行读 JSONL（懒迭代）；跳过空行和解析失败行（不抛错）。
 
     Args:
         path: JSONL 文件路径。文件不存在时直接结束（yield 0 个），不抛 FileNotFoundError。
+        max_lines: 最多 yield 多少条记录；``None`` = 读到文件末尾。
+            给 ``None``/``<=0`` = 不限制（按文件实际行数）。
+            用于"只取前 N 条"场景（例如最近 10 条 task 记录），不必把整文件读进内存。
 
     Yields:
         解析后的对象（dict / list / 标量均可，类型由调用方负责）。
@@ -34,13 +40,23 @@ def iter_jsonl(path: Path) -> Iterator[Any]:
         使用 ``path.open()`` + ``for line in f`` 懒迭代，而不是
         ``read_text().splitlines()``；queue.jsonl / generations.jsonl
         长期 append 后可能很大，整文件载入内存不必要。
+
+        encoding 用 ``utf-8-sig`` 而非 ``utf-8``：兼容外部工具（Windows 记事本、
+        Excel 导出、某些 CLI ``> file.jsonl`` 重定向）写出的 BOM 文件，
+        首字符 ``\\ufeff`` 会被自动剥离；纯 utf-8 文件行为完全一致。
     """
     if not path.exists():
         return
     # 懒迭代：with open() + for line in f，逐行从内核 buffer 读，
     # 避免 read_text().splitlines() 预建整文件 lines 列表的内存开销。
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
+    # encoding="utf-8-sig" 自动处理首行 BOM（边界条件）；纯 utf-8 文件不受影响。
+    with path.open("r", encoding="utf-8-sig") as f:
+        for i, line in enumerate(f):
+            if max_lines is not None and max_lines > 0 and i >= max_lines:
+                # 早返：避免把整文件读完才发现"我只要前 N 条"。
+                # i 是已 yield 数（含被跳过的坏行/空行），但调用方关心的是
+                # "最多 yield 多少个有效 rec"，用 i 偏紧一格是安全的（不会多 yield）。
+                return
             line = line.strip()
             if not line:
                 continue
@@ -50,16 +66,17 @@ def iter_jsonl(path: Path) -> Iterator[Any]:
             yield rec
 
 
-def read_jsonl(path: Path) -> list[Any]:
+def read_jsonl(path: Path, max_lines: int | None = None) -> list[Any]:
     """一次性读出整个 JSONL 为 list（坏行静默跳过）。
 
     Args:
         path: JSONL 文件路径。
+        max_lines: 透传给 ``iter_jsonl``；``None`` = 全部。
 
     Returns:
         解析后的对象列表；文件不存在时返回 ``[]``。
     """
-    return list(iter_jsonl(path))
+    return list(iter_jsonl(path, max_lines=max_lines))
 
 
 def append_jsonl(path: Path, rec: Any) -> None:
