@@ -4,6 +4,7 @@ from __future__ import annotations
 import subprocess
 from typing import Any
 
+from ..util.result import fail_error as _fail
 from .blacklist import assert_command_allowed
 
 
@@ -64,11 +65,8 @@ def _truncate_output(
     return f"{text[:head]}{_OMITTED_MARKER.format(n=n - total)}{text[-tail:]}"
 
 
-def _fail(error: str, /, **extras: Any) -> dict[str, Any]:
-    """ok=False 字典工厂。positional-only error; extras 显式传入才出现。"""
-    out: dict[str, Any] = {"ok": False, "error": error}
-    out.update(extras)
-    return out
+# === _fail 字典工厂已抽到 src/xragent/util/result.py::fail_error
+# (test_exec_tools.py::TestFail 锁死 "error" 字段 + **extras 行为) ===
 
 
 def _resolve_timeout(timeout_s: int | float | None) -> int:

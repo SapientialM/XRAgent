@@ -2,11 +2,15 @@
 
 历史
 ----
-2026-07-30 round：``diary_write`` 之前没有 OSError 兜底，遇到 PermissionError /
+2026-07-30 round:``diary_write`` 之前没有 OSError 兜底，遇到 PermissionError /
 磁盘满时会直接向上抛 OSError，破坏 LLM 工具层 "always returns dict" 的契约
 （``fs_tools`` 已经统一改造过，本次把 ``diary_tools`` 也对齐）。同时把
 ``## [HH:MM:SS] title\\n\\nbody\\n`` 块格式抽成 ``_format_block`` helper，
 方便后续 ``diary_archive`` / 别的写日记入口复用同一种格式。
+
+2026-07-30 round(本轮):``_fail`` 与 ``fs_tools._fail`` / ``exec_tools._fail``
+同形（都是 ``{"ok": False, "error": <str>}`` 工厂），抽到
+``src/xragent/util/result.py`` 统一实现，本模块只 re-export。
 """
 from __future__ import annotations
 
@@ -14,12 +18,8 @@ import time
 from typing import Any
 
 from ..config.settings import get_settings
+from ..util.result import fail_error as _fail
 from .blacklist import PathSandbox
-
-
-def _fail(error: str) -> dict[str, Any]:
-    """``ok=False`` 字典工厂；与 ``fs_tools._fail`` 同形 (LLM 工具层契约对齐)。"""
-    return {"ok": False, "error": error}
 
 
 def _require_nonblank(field: str, value: object) -> str | None:

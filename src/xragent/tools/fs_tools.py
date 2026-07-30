@@ -5,20 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from ..config.settings import get_settings
+from ..util.result import fail_error as _fail
 from .blacklist import BlacklistedTarget, PathSandbox
-
-
-# -------------------- 公共 helper --------------------
-
-def _fail(error: str) -> dict[str, Any]:
-    """``ok=False`` 字典工厂,read_file / list_dir / write_file 三处共用。
-
-    抽出来原因: 三个工具的"越界 / 不存在 / 类型错 / 权限错"失败路径
-    之前各自 inline 写 ``{"ok": False, "error": ...}``,文案漂移风险大,
-    现在统一收口。文案前缀 ("读取失败" / "写入失败" / "列出失败") 由
-    调用方在传入 ``error`` 时决定, 方便 LLM 看到立刻定位出错环节。
-    """
-    return {"ok": False, "error": error}
 
 
 # -------------------- 路径围栏 helpers --------------------
