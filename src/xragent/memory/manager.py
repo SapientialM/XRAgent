@@ -20,6 +20,11 @@ class Fact:
     # 与 source_turn (TEXT, turn id 字符串) 并存: 字符串给人看, 整数给索引。
     # 新字段放在末尾 + 默认 None, 老代码 positional 构造 5 个字段不会破坏。
     source_turn_idx: int | None = None
+    # 5.3: 新增字段，对应 DB 列 priority (INTEGER NOT NULL DEFAULT 0)。
+    # 配合 recall_high_priority() 用: 让"高重要级 fact 优先"成为一等公民。
+    # 与 source_turn_idx 同样是末尾 + 默认值, 老代码构造 5 字段不受影响。
+    # 默认 0 表示"未标重要级", recall_high_priority 默认 min_priority=1 过滤掉。
+    priority: int = 0
 
 
 class MemoryManager:
@@ -34,26 +39,6 @@ class MemoryManager:
     #   - 新字段 nullable; 老行 source_turn_idx=NULL, recall_by_turn_idx 会跳过
     #   - 新 DB 走 BASE_SCHEMA 直接含新列; 老 DB 走 _migrate_v51 幂等 ALTER
     #   - 旧 API 调用方不受影响: source_turn (TEXT) 仍然保留
-    BASE_SCHEMA = """
-    CREATE TABLE IF NOT EXISTS facts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      ts REAL NOT NULL,
-      category TEXT NOT NULL,
-      content TEXT NOT NULL,
-      source_turn TEXT,
-      source_turn_idx INTEGER
-    );
-    """
-
-    INDEX_SCHEMA = """
-    CREATE INDEX IF NOT EXISTS idx_facts_category_ts ON facts(category, ts DESC);
-    CREATE INDEX IF NOT EXISTS idx_facts_ts ON facts(ts DESC);
-    CREATE INDEX IF NOT EXISTS idx_facts_source_turn ON facts(source_turn);
-    CREATE INDEX IF NOT EXISTS idx_facts_source_turn_idx ON facts(source_turn_idx);
-    """
-
-    # 兼容旧引用 (任何外部代码读 SCHEMA 仍可拿到完整脚本)
-    SCHEMA = BASE_SCHEMA + INDEX_SCHEMA
 
     # === Schema 版本: 5.1 → 5.2 ===
     # 变更:
@@ -65,6 +50,52 @@ class MemoryManager:
     #   - schema 0 改动 (不需 migration)
     #   - 走 idx_facts_source_turn_idx 索引 O(log n) (5.1 已建, 复用)
     #   - 新方法对老调用方零影响 (新增, 不替换任何现有方法)
+
+    # === Schema 版本: 5.2 → 5.3 ===
+    # 变更:
+    #   1. facts 表新增列 priority INTEGER NOT NULL DEFAULT 0
+    #   2. 新增索引 idx_facts_category_priority_ts
+    #        ON facts(category, priority DESC, ts DESC)
+    #   3. 新增方法 recall_high_priority(k, category, min_priority) -> list[Fact]
+    #   4. Fact dataclass 末尾新增 priority: int = 0 字段
+    # 用途:
+    #   - 让"按 priority 排序召回"成为可能 (重要 fact 不被海量 history 淹没)
+    #   - 复合索引走 recall_high_priority(category=?) O(log n) 路径
+    # 向后兼容:
+    #   - 老行 ALTER 后会被 UPDATE 回填 priority=0 (保险, 见 _migrate_v53)
+    #   - 新 DB 走 BASE_SCHEMA 直接含新列 + DEFAULT 0
+    #   - save_fact() 新参数 priority: int = 0, 老调用零影响
+    # 索引选择理由:
+    #   - recall_high_priority(category=?) 主路径:
+    #       WHERE category=? AND priority>=?
+    #       ORDER BY priority DESC, ts DESC LIMIT k
+    #   - 复合 (category, priority DESC, ts DESC) 让 SQLite:
+    #       a) category 等值过滤做 index seek
+    #       b) priority DESC + ts DESC 已是索引顺序, ORDER BY 零成本
+    #       c) LIMIT 提前结束扫描
+    #   - 单列 idx_facts_priority 不够: WHERE category=? 仍要 row filter
+    BASE_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS facts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts REAL NOT NULL,
+      category TEXT NOT NULL,
+      content TEXT NOT NULL,
+      source_turn TEXT,
+      source_turn_idx INTEGER,
+      priority INTEGER NOT NULL DEFAULT 0
+    );
+    """
+
+    INDEX_SCHEMA = """
+    CREATE INDEX IF NOT EXISTS idx_facts_category_ts ON facts(category, ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_facts_ts ON facts(ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_facts_source_turn ON facts(source_turn);
+    CREATE INDEX IF NOT EXISTS idx_facts_source_turn_idx ON facts(source_turn_idx);
+    CREATE INDEX IF NOT EXISTS idx_facts_category_priority_ts ON facts(category, priority DESC, ts DESC);
+    """
+
+    # 兼容旧引用 (任何外部代码读 SCHEMA 仍可拿到完整脚本)
+    SCHEMA = BASE_SCHEMA + INDEX_SCHEMA
 
     # Schema notes:
     # 1. (category, ts DESC) composite index covers recall()'s two main patterns:
@@ -79,12 +110,16 @@ class MemoryManager:
     #    a full scan if that pattern emerges.
     # 4. (source_turn_idx) index: 新增, 与 #3 对偶, 走整数 turn 索引。
     #    5.2 起还支撑 delete_by_turn_idx() 的 O(log n) 删除。
-    # 5. Old single-column idx_facts_category is a prefix of the composite and is
+    # 5. (category, priority DESC, ts DESC): 5.3 新增, 配合 recall_high_priority。
+    #    是 idx_facts_category_ts 的"超集" (priority 永远追加在 ts 前), 但因为
+    #    排序不同 (priority DESC vs ts DESC), 不能复用, 必须独立索引。
+    # 6. Old single-column idx_facts_category is a prefix of the composite and is
     #    therefore redundant; existing DBs may still carry it (harmless).
 
     # SELECT 投影顺序约定：所有 SELECT 都要按这个 tuple 顺序输出, _row_to_fact 才能
     # 用 fixed indices 还原 Fact。新加列必须追加在末尾 + 同步更新本约定。
-    _FACT_COLUMNS = ("id", "ts", "category", "content", "source_turn", "source_turn_idx")
+    # 5.3: 末尾追加 priority。
+    _FACT_COLUMNS = ("id", "ts", "category", "content", "source_turn", "source_turn_idx", "priority")
 
     @staticmethod
     def _row_to_fact(row: tuple) -> Fact:
@@ -92,6 +127,7 @@ class MemoryManager:
 
         抽到此处前 4 个召回方法 (recall/recall_range/recall_by_turn_idx/recent) 各写
         一份 7 行 ``Fact(id=r[0], ts=r[1], ...)``, 加列时容易漏一处; 集中后只改一处。
+        5.3: 末尾多读 row[6] = priority。
         """
         return Fact(
             id=row[0],
@@ -100,6 +136,7 @@ class MemoryManager:
             content=row[3],
             source_turn=row[4],
             source_turn_idx=row[5],
+            priority=row[6],
         )
 
     def __init__(self, db_path: Path | None = None):
@@ -117,6 +154,7 @@ class MemoryManager:
         # 顺序: BASE_SCHEMA (新 DB 拿全列) -> 幂等 migration (老 DB 补列) -> 索引
         self._conn.executescript(self.BASE_SCHEMA)
         self._migrate_v51()
+        self._migrate_v53()
         self._conn.executescript(self.INDEX_SCHEMA)
         self._conn.commit()
 
@@ -132,24 +170,50 @@ class MemoryManager:
             self._conn.execute("ALTER TABLE facts ADD COLUMN source_turn_idx INTEGER")
             self._conn.commit()
 
+    def _migrate_v53(self) -> None:
+        """5.2 → 5.3: 为已存在的 facts 表补 priority 列 + 老行回填。
+
+        三步:
+          1. PRAGMA table_info 探列; 已存在直接 return (幂等)
+          2. ALTER TABLE ADD COLUMN priority INTEGER NOT NULL DEFAULT 0
+          3. UPDATE facts SET priority = 0 WHERE priority IS NULL  (老行回填)
+
+        SQLite 自 3.31.0 (2020-01) 起, ALTER TABLE ADD COLUMN ... DEFAULT 会
+        自动回填老行为 DEFAULT; 但早于该版本的行为是"schema 写 DEFAULT, 但老
+        行实际值是 NULL"。显式 UPDATE 是保险, 1 行 SQL 代价低, 也让
+        recall_high_priority WHERE priority >= 1 的语义对老数据自然成立
+        (NULL >= 1 在 SQLite 是 NULL, 不匹配)。
+        """
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(facts)").fetchall()]
+        if "priority" in cols:
+            return
+        self._conn.execute(
+            "ALTER TABLE facts ADD COLUMN priority INTEGER NOT NULL DEFAULT 0"
+        )
+        # 老行回填 (兼容 pre-3.31 SQLite)
+        self._conn.execute("UPDATE facts SET priority = 0 WHERE priority IS NULL")
+        self._conn.commit()
+
     def save_fact(
         self,
         category: str,
         content: str,
         source_turn: str = "",
         source_turn_idx: int | None = None,
+        priority: int = 0,
     ) -> Fact:
         """插入一条 fact, 返回刚插入的 Fact 对象 (含 db 自增 id 与 ts)。
 
         返回类型 5.0→5.1 由 int 改为 Fact:
           - 老调用方关心 id: 改用 .id
           - 顺便拿到 ts / category / content, 不必再 recall 一次
+        5.3: 新参数 priority: int = 0, 老调用零影响。
         """
         ts = time.time()
         cur = self._conn.execute(
-            "INSERT INTO facts (ts, category, content, source_turn, source_turn_idx) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (ts, category, content, source_turn, source_turn_idx),
+            "INSERT INTO facts (ts, category, content, source_turn, source_turn_idx, priority) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (ts, category, content, source_turn, source_turn_idx, priority),
         )
         self._conn.commit()
         new_id = cur.lastrowid or 0
@@ -160,10 +224,14 @@ class MemoryManager:
             content=content,
             source_turn=source_turn,
             source_turn_idx=source_turn_idx,
+            priority=priority,
         )
 
     def recall(self, query: str, k: int = 5, category: str | None = None) -> list[Fact]:
-        sql = "SELECT id, ts, category, content, source_turn, source_turn_idx FROM facts"
+        sql = (
+            "SELECT id, ts, category, content, source_turn, source_turn_idx, priority "
+            "FROM facts"
+        )
         clauses = []
         params = []
         if query:
@@ -196,7 +264,10 @@ class MemoryManager:
           - ts + category  -> idx_facts_category_ts
         ORDER BY ts DESC 让 LIMIT 提前结束。
         """
-        sql = "SELECT id, ts, category, content, source_turn, source_turn_idx FROM facts"
+        sql = (
+            "SELECT id, ts, category, content, source_turn, source_turn_idx, priority "
+            "FROM facts"
+        )
         clauses: list[str] = []
         params: list = []
         if start_ts is not None:
@@ -248,7 +319,7 @@ class MemoryManager:
         NULL 的 source_turn_idx 会被过滤 (老行 / 没填的写入)。
         """
         rows = self._conn.execute(
-            "SELECT id, ts, category, content, source_turn, source_turn_idx "
+            "SELECT id, ts, category, content, source_turn, source_turn_idx, priority "
             "FROM facts WHERE source_turn_idx = ? "
             "ORDER BY ts DESC LIMIT ?",
             (turn_idx, k),
@@ -276,9 +347,46 @@ class MemoryManager:
         self._conn.commit()
         return cur.rowcount
 
+    def recall_high_priority(
+        self,
+        k: int = 10,
+        category: str | None = None,
+        min_priority: int = 1,
+    ) -> list[Fact]:
+        """按 priority DESC, ts DESC 排序召回。5.3 新方法。
+
+        索引命中: idx_facts_category_priority_ts (5.3 新建)。
+          - 有 category 时: index seek (category, priority, ts) 走完整索引
+          - 无 category 时: 退化为 priority 上的 range scan, 仍优于全表
+        ORDER BY priority DESC, ts DESC 让 LIMIT 提前结束。
+
+        默认 min_priority=1 排除 priority=0 的默认行, 只返回显式标过重要级的
+        fact; 想召回全部 priority=0 时显式传 min_priority=0。
+
+        Args:
+            k: 返回条数, 默认 10。
+            category: 可选 category 过滤; 传了走复合索引, 不传走单维排序。
+            min_priority: 召回的 priority 下限, 默认 1 (排除默认行)。
+
+        Returns:
+            按 priority DESC, ts DESC 排序的 Fact 列表。
+        """
+        sql = (
+            "SELECT id, ts, category, content, source_turn, source_turn_idx, priority "
+            "FROM facts WHERE priority >= ?"
+        )
+        params: list = [min_priority]
+        if category:
+            sql += " AND category = ?"
+            params.append(category)
+        sql += " ORDER BY priority DESC, ts DESC LIMIT ?"
+        params.append(k)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [self._row_to_fact(r) for r in rows]
+
     def recent(self, n: int = 20) -> list[Fact]:
         rows = self._conn.execute(
-            "SELECT id, ts, category, content, source_turn, source_turn_idx "
+            "SELECT id, ts, category, content, source_turn, source_turn_idx, priority "
             "FROM facts ORDER BY ts DESC LIMIT ?",
             (n,),
         ).fetchall()

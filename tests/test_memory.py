@@ -198,3 +198,99 @@ def test_delete_by_turn_idx_skips_null_idx_rows(repo_root):
     # 两条都还在
     assert m.count() == 2
     assert len(m.recall_by_turn_idx(8)) == 1
+
+# === 5.3 新方法 + 新字段测试 ===
+
+def test_priority_field_persists(repo_root):
+    """5.3: Fact dataclass 加 priority 字段, save/recall 持久化。"""
+    m = MemoryManager()
+    f = m.save_fact(
+        "preference", "user 喜欢简洁", source_turn="t10",
+        source_turn_idx=10, priority=3,
+    )
+    assert f.priority == 3
+
+    hits = m.recall("简洁")
+    assert hits and hits[0].priority == 3
+
+
+def test_save_fact_priority_default_is_zero(repo_root):
+    """5.3: 不传 priority 时默认 0, recall_high_priority 默认不召回。"""
+    m = MemoryManager()
+    f = m.save_fact("note", "默认 priority")
+    assert f.priority == 0
+
+
+def test_recall_high_priority_orders_by_priority_then_ts(repo_root):
+    """5.3: recall_high_priority 按 priority DESC, ts DESC 排序。"""
+    m = MemoryManager()
+    # priority=5 在 t1 写入
+    f1 = m.save_fact("note", "high first", source_turn="t1", source_turn_idx=1, priority=5)
+    # priority=5 但后写 — 应排在前一条之后 (ts DESC)
+    f2 = m.save_fact("note", "high later", source_turn="t2", source_turn_idx=2, priority=5)
+    # priority=3 — 排在两个 5 之后
+    f3 = m.save_fact("note", "mid", source_turn="t3", source_turn_idx=3, priority=3)
+    # priority=0 — 默认行, 不应出现
+    m.save_fact("note", "default", source_turn="t4", source_turn_idx=4)
+
+    hits = m.recall_high_priority(k=10)
+    contents = [h.content for h in hits]
+    # priority=5 两条在前, priority=3 第三, priority=0 不在
+    assert contents == ["high later", "high first", "mid"]
+
+
+def test_recall_high_priority_min_priority_excludes_default(repo_root):
+    """5.3: min_priority=1 默认排除 priority=0 行; min_priority=0 召回全部。"""
+    m = MemoryManager()
+    m.save_fact("note", "p=5 row", priority=5)
+    m.save_fact("note", "p=3 row", priority=3)
+    m.save_fact("note", "p=0 row")  # 默认
+
+    # 默认 min_priority=1: 只召回 p>=1
+    hits = m.recall_high_priority(k=10)
+    assert {h.content for h in hits} == {"p=5 row", "p=3 row"}
+
+    # 显式 min_priority=0: 召回全部
+    all_hits = m.recall_high_priority(k=10, min_priority=0)
+    assert {h.content for h in all_hits} == {"p=5 row", "p=3 row", "p=0 row"}
+
+
+def test_recall_high_priority_with_category(repo_root):
+    """5.3: 传 category 时走 idx_facts_category_priority_ts 复合索引。"""
+    m = MemoryManager()
+    m.save_fact("preference", "p high A", priority=5)
+    m.save_fact("preference", "p high B", priority=3)
+    m.save_fact("history", "h high", priority=5)  # 不同 category
+
+    hits = m.recall_high_priority(k=10, category="preference")
+    contents = [h.content for h in hits]
+    assert "h high" not in contents
+    assert contents == ["p high A", "p high B"]
+    assert all(h.category == "preference" for h in hits)
+
+
+def test_recall_high_priority_respects_k_limit(repo_root):
+    """5.3: k 限制条数, 多余的 priority 高行不会被召回。"""
+    m = MemoryManager()
+    for i in range(5):
+        m.save_fact("note", f"p=5 row {i}", priority=5)
+    hits = m.recall_high_priority(k=3)
+    assert len(hits) == 3
+    assert all(h.priority == 5 for h in hits)
+
+
+def test_schema_v53_migration_idempotent(repo_root):
+    """5.3 migration: 反复 init 不应破坏, priority 列不会被重复加。"""
+    m1 = MemoryManager()
+    cols1 = [r[1] for r in m1._conn.execute("PRAGMA table_info(facts)").fetchall()]
+    assert "priority" in cols1
+
+    # 第二次调用不应抛, 也不应再加列
+    m1._migrate_v53()
+    cols2 = [r[1] for r in m1._conn.execute("PRAGMA table_info(facts)").fetchall()]
+    assert cols2.count("priority") == 1
+
+    # 索引存在
+    idx = [r[1] for r in m1._conn.execute("PRAGMA index_list(facts)").fetchall()]
+    assert "idx_facts_category_priority_ts" in idx
+    m1.close()
