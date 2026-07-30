@@ -124,8 +124,12 @@ def build_default_registry() -> ToolRegistry:
     add("git_commit", "对仓库内当前变更做 git add+commit；返回 commit hash。需要 HITL 审批。",
         {"type": "object", "properties": {"message": {"type": "string"}}, "required": ["message"]},
         "high", git_tools.git_commit)
-    add("git_push", "git push 到 origin/<branch>；网络失败时返回错误。需要 HITL 审批。",
-        {"type": "object", "properties": {"remote": {"type": "string", "default": "origin"}, "branch": {"type": "string", "default": "main"}}},
+    add("git_push", "git push 到 origin/<branch>；网络失败或超时时返回错误。默认 30s 超时。需要 HITL 审批。",
+        {"type": "object", "properties": {
+            "remote": {"type": "string", "default": "origin"},
+            "branch": {"type": "string", "default": "main"},
+            "timeout_s": {"type": "number", "default": 30, "description": "push 超时秒数；None / 非正数 / 非数值 → 默认 30s"},
+        }},
         "high", git_tools.git_push)
     add("memory_save", "向长期记忆写入一条事实（SQLite）。",
         {"type": "object", "properties": {"category": {"type": "string"}, "content": {"type": "string"}}, "required": ["category", "content"]},

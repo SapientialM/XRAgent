@@ -1,9 +1,56 @@
-"""git 工具:commit / push。"""
+"""git 工具:commit / push。
+
+**v0.5.4 timeout**:
+  - ``git_push`` 加 ``timeout_s`` 参数（默认 30s，与 ``exec_tools`` 一致）。
+    此前 ``git push`` 直接调 ``subprocess.run`` 无 timeout,网络卡住或 SSH
+    挂起会让 LLM 工具调用无限阻塞,直到外层 ReAct 循环超时。修法:
+      * 抽 ``_fail(msg, **extras)`` 统一 ``ok=False`` 字典（与 exec_tools 对齐）
+      * 抽 ``_resolve_timeout(value, *, default) -> int`` 归一化 timeout 输入
+        (None / bool / 非数值 / 非正数 → default;其余 ``int(value)``)
+      * 捕获 ``subprocess.TimeoutExpired`` 转 ``ok=False, msg="超时（>{t}s）"``
+      * 捕获 ``FileNotFoundError`` / ``OSError`` 转 ``ok=False, msg="<type>: <e>"``
+  - ``git_commit`` 不动: 内部是本地 ``git commit``,默认 30s 在 conftest 的
+    裸本地仓库里几乎不可能超时;真要卡也由 ``SideGit`` 内的 ``RuntimeError``
+    抛出后被 ``registry`` 的兜底 ``except Exception`` 转成 ``ok=False``,
+    与现有契约一致。
+"""
 from __future__ import annotations
 
+import subprocess
 from typing import Any
 
 from ..snapshot.side_git import SideGit
+
+
+# === 常量：与 exec_tools 对齐，便于两处工具 timeout 行为一致 ===
+DEFAULT_PUSH_TIMEOUT_S: int = 30
+
+
+def _fail(msg: str, /, **extras: Any) -> dict[str, Any]:
+    """``ok=False`` 字典工厂。``msg`` 是 positional-only 必填;
+
+    ``**extras`` 显式传入才出现,默认空。LLM 工具契约要求最小键集,
+    不要随便往 extras 里塞字段。
+    """
+    out: dict[str, Any] = {"ok": False, "msg": msg}
+    out.update(extras)
+    return out
+
+
+def _resolve_timeout(value: object, *, default: int) -> int:
+    """归一化 timeout 输入到合法正整数。
+
+    拒绝: ``None`` / ``bool`` (Python 里 ``bool`` 是 ``int`` 子类, 必须先排除
+    否则 ``True`` 会被当 ``1``) / 非 ``int | float`` / 非正数 (含 0)。
+    通过: 其他 ``int | float`` → ``int(value)``。
+    """
+    if value is None or isinstance(value, bool):
+        return default
+    if not isinstance(value, (int, float)):
+        return default
+    if value <= 0:
+        return default
+    return int(value)
 
 
 def git_commit(message: str) -> dict[str, Any]:
@@ -29,10 +76,14 @@ def git_commit(message: str) -> dict[str, Any]:
     return {"ok": True, "head": head, "no_changes": head is None}
 
 
-def git_push(remote: str = "origin", branch: str = "main") -> dict[str, Any]:
+def git_push(
+    remote: str = "origin",
+    branch: str = "main",
+    timeout_s: int | float | None = DEFAULT_PUSH_TIMEOUT_S,
+) -> dict[str, Any]:
     """把当前 HEAD push 到 ``<remote>/<branch>``。
 
-    失败(无 origin / 鉴权失败 / 网络断)时返回 ``ok=False, msg=<诊断信息>``,
+    失败(无 origin / 鉴权失败 / 网络断 / **超时**)时返回 ``ok=False, msg=<诊断>``,
     不会抛异常 —— LLM 拿到结果后自己决定重试 / 放弃 / 报警。成功的
     push 在 ``msg=""``(git push 成功时 stderr/stdout 通常为空)。
 
@@ -40,13 +91,38 @@ def git_push(remote: str = "origin", branch: str = "main") -> dict[str, Any]:
         remote: 远端名;默认 ``"origin"``,与 ``SideGit.push`` 默认一致
             (test_git_tools.py::test_git_push_default_remote_branch_is_origin_main 锁)。
         branch: 分支名;默认 ``"main"``。
+        timeout_s: push 超时秒数。``None`` / 非数值 / 非正数 → 默认 30s。
+            超时不会抛异常,而是返回 ``ok=False, msg="超时（>{t}s）: ..."``。
+            这一层兜底是为防止网络卡住时 LLM 工具调用无限阻塞 —— 之前
+            ``subprocess.run`` 不带 timeout,SSH 鉴权挂起会让 ReAct 循环
+            等到外层超时才返回。
 
     Returns:
         严格只含 2 个键的 dict(LLM 工具契约,test_git_tools.py 锁定):
             * ``ok`` (bool): True 表示 push 成功 (rc == 0)
-            * ``msg`` (str): 失败时是 stderr(或 stdout) 的诊断信息,
+            * ``msg`` (str): 失败时是 stderr(或 stdout) 的诊断信息;
                 成功时为空字符串。绝对非空当 ``ok=False`` 时。
     """
+    effective_timeout = _resolve_timeout(timeout_s, default=DEFAULT_PUSH_TIMEOUT_S)
+
     sg = SideGit()
-    ok, msg = sg.push(remote=remote, branch=branch)
-    return {"ok": ok, "msg": msg}
+    try:
+        result = subprocess.run(
+            ["git", "push", remote, branch],
+            cwd=str(sg.root),
+            capture_output=True,
+            text=True,
+            timeout=effective_timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        return _fail(
+            f"超时（>{effective_timeout}s）",
+            timed_out=True,
+        )
+    except (FileNotFoundError, OSError) as e:
+        return _fail(f"{type(e).__name__}: {e}")
+
+    return {
+        "ok": result.returncode == 0,
+        "msg": (result.stderr or result.stdout).strip(),
+    }
