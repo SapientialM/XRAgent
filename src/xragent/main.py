@@ -9,7 +9,6 @@ import argparse
 import os
 import queue
 import signal as _signal
-import subprocess
 import sys
 import threading
 import time
@@ -21,6 +20,7 @@ from .core.react_loop import ReActLoop
 from .hitl.gate import HitlGate
 from .memory.manager import MemoryManager
 from .tools.registry import build_default_registry
+from .util.subprocess_utils import run_capture
 from .watchdog import runtime_state as rs
 
 
@@ -308,6 +308,22 @@ def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
     last_push_ts = 0.0  # 0 = 下一次 commit 后立即 push；之后每 push_interval_minutes push 一次
     push_interval_s = max(60, s.push_interval_minutes * 60)
 
+    def _count_unpushed_commits() -> int:
+        """数 HEAD 比 origin/main 多的 commit 数（=未推的本地 commit 数）。
+
+        通过 :func:`xragent.util.subprocess_utils.run_capture` 调
+        ``git rev-list --count``，超时/IO 异常时返回 0（与原 inline ``try/except``
+        行为一致：把 TimeoutExpired/FileNotFoundError/OSError 全部视为"没未推 commit"）。
+        ``rc >= 0`` 表示子进程正常返回（即使 rc != 0，stdout 仍可能非空，
+        例如本地无 origin/main 时返回 0 但 stdout 有数据；继续解析即可）。
+        """
+        rc, out, _err = run_capture(
+            ["git", "rev-list", "--count", "origin/main..HEAD"],
+            cwd=s.repo_root,
+            timeout=5,
+        )
+        return int(out.strip() or 0) if rc >= 0 else 0
+
     def maybe_periodic_push(force: bool = False) -> None:
         """按 ``push_interval_minutes`` 节流调一次 ``sg.push()``；无新 commit 则空转。
 
@@ -319,14 +335,7 @@ def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
         if not force and last_push_ts and (now - last_push_ts) < push_interval_s:
             return
         # 只在有未推 commit 时 push（HEAD 比 origin/main 新）
-        try:
-            ahead = subprocess.run(
-                ["git", "rev-list", "--count", "origin/main..HEAD"],
-                cwd=str(s.repo_root), capture_output=True, text=True, timeout=5,
-            )
-            n = int(ahead.stdout.strip() or 0)
-        except Exception:
-            n = 0
+        n = _count_unpushed_commits()
         if n == 0:
             last_push_ts = now
             return
