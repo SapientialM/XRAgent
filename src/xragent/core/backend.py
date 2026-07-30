@@ -57,7 +57,22 @@ class MockBackend:
         {"content": "你说了什么？我在听 (mock)。", "finish_reason": "stop"},
     ]
 
-    def __init__(self, script_path: str | None = None):
+    def __init__(self, script_path: str | None = None) -> None:
+        """初始化 mock backend 并预加载剧本。
+
+        加载顺序:
+          * ``XRAGENT_MOCK_SCRIPT`` 环境变量 > 显式 ``script_path``;
+          * 文件存在时按行 ``json.loads`` 后追加到 ``self._script``;
+          * 文件为空 / 不存在 / 解析全失败时回退到 :data:`DEFAULT_SCRIPT`。
+
+        Args:
+            script_path: 覆盖环境变量的剧本路径; ``None`` 时用
+                ``XRAGENT_MOCK_SCRIPT`` 或 ``DEFAULT_SCRIPT``。
+
+        Side effects:
+            设置 ``self.script_path`` / ``self._cursor`` / ``self._script``;
+            任何 IO / 解析异常会让 :data:`DEFAULT_SCRIPT` 兜底,不会抛错。
+        """
         self.script_path = script_path or _MOCK_RESPONSES_PATH
         self._cursor = 0
         self._script = []
@@ -81,7 +96,19 @@ class MockBackend:
     def _parse_line(self, line: str) -> Turn:
         return self._parse_line_obj(json.loads(line))
 
-    def chat(self, messages, tools) -> Turn:
+    def chat(self, messages: list[Message], tools: list[ToolSpec]) -> Turn:
+        """按 ``self._cursor`` 轮询 ``self._script`` 返回下一条 Turn。
+
+        自动给 ``tool_calls`` 里 id 为空的项补 ``mock_call_<n>`` (n 是
+        当前 cursor+1,避免与下次调用冲突)。
+
+        Args:
+            messages: 当前会话消息列表; mock 不消费,仅占位签名。
+            tools: 当前可用工具规范列表; mock 不消费,仅占位签名。
+
+        Returns:
+            Turn: 剧本中下一条预录响应。
+        """
         turn = self._script[self._cursor % len(self._script)]
         self._cursor += 1
         for tc in turn.tool_calls:
@@ -89,16 +116,48 @@ class MockBackend:
                 tc.id = f"mock_call_{self._cursor}"
         return turn
 
-    def stream_chat(self, messages, tools):
+    def stream_chat(self, messages: list[Message], tools: list[ToolSpec]) -> Iterator[Turn]:
+        """流式返回 mock 响应 —— 实际一次性 ``yield`` 一条 Turn。
+
+        签名与 LangChain backend 对齐,即使 mock 不真的"流",也能让
+        上层用同一份代码路径处理两种 backend。
+
+        Args:
+            messages: 同 :meth:`chat`。
+            tools: 同 :meth:`chat`。
+
+        Yields:
+            Turn: 剧本中的下一条 Turn (仅一条)。
+        """
         yield self.chat(messages, tools)
 
 
 class LangChainBackend:
-    def __init__(self, settings: Settings | None = None):
+    """基于 LangChain ChatOpenAI 的 backend,生产环境用。"""
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        """加载配置并立刻构造 :class:`ChatOpenAI` 客户端。
+
+        Args:
+            settings: 配置单例; ``None`` 时通过 :func:`get_settings` 取。
+                任意 :class:`Settings` 都必须含 ``active_api_key`` /
+                ``active_base_url`` / ``active_model`` / ``llm_temperature``
+                / ``llm_max_tokens`` 字段 (见 :class:`Settings` 定义)。
+
+        Side effects:
+            立刻调用 :meth:`_build_impl`,可能触发 ``langchain_openai``
+            的导入 (重操作,首次启动有 ~200ms 延迟)。
+        """
         self.settings = settings or get_settings()
         self._impl = self._build_impl()
 
-    def _build_impl(self):
+    def _build_impl(self) -> Any:
+        """构造底层 LangChain ``ChatOpenAI`` 客户端。
+
+        Returns:
+            Any: :class:`langchain_openai.ChatOpenAI` 实例 (返回 ``Any``
+                以避免在模块顶部 ``import langchain_openai``,加重型依赖)。
+        """
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(
             model=self.settings.active_model,
@@ -108,7 +167,22 @@ class LangChainBackend:
             openai_api_base=self.settings.active_base_url,
         )
 
-    def chat(self, messages, tools) -> Turn:
+    def chat(self, messages: list[Message], tools: list[ToolSpec]) -> Turn:
+        """把 XRAgent 消息格式转 LangChain 格式后调一次 LLM。
+
+        role 映射: ``system→SystemMessage`` / ``user→HumanMessage`` /
+        ``assistant→AIMessage`` / ``tool→ToolMessage``;未知 role 直接
+        :class:`ValueError` 抛错,让调用方立刻感知协议漂移。
+
+        Args:
+            messages: 待发消息序列;首条建议为 system prompt。
+            tools: 可用工具规范列表;非空时通过 ``bind_tools`` 注入。
+
+        Returns:
+            Turn: ``content`` 为模型文本, ``tool_calls`` 从
+                ``result.tool_calls`` 抽取, ``usage`` 从
+                ``response_metadata.token_usage`` 抽取。
+        """
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
         lc_msgs = []
@@ -142,19 +216,37 @@ class LangChainBackend:
             usage=usage,
         )
 
-    def stream_chat(self, messages, tools):
+    def stream_chat(self, messages: list[Message], tools: list[ToolSpec]) -> Iterator[Turn]:
+        """流式接口 —— 当前实现与 :meth:`chat` 等价,只 ``yield`` 一次。
+
+        与 mock backend 行为对齐,等 LangChain 真流式接入后再改。
+
+        Args:
+            messages: 同 :meth:`chat`。
+            tools: 同 :meth:`chat`。
+
+        Yields:
+            Turn: 一次性产出当前轮的完整 Turn。
+        """
         yield self.chat(messages, tools)
 
 
-def _to_lc_tool(spec: ToolSpec):
+def _to_lc_tool(spec: ToolSpec) -> Any:
     """包装 XRAgent 的 ToolSpec 为 LangChain StructuredTool。
 
     用 Pydantic 模型作为 args_schema；这样 LangChain 不会把参数打包成 kwargs dict，
     而是按 schema 字段名正确展开。
+
+    Args:
+        spec: XRAgent 工具规范, ``input_schema`` 应为 JSON Schema 形
+            ``{"type": "object", "properties": {...}, "required": [...]}``。
+
+    Returns:
+        Any: :class:`langchain_core.tools.StructuredTool` 实例 (返回 ``Any``
+            因为 ``StructuredTool`` 仅在函数内导入)。
     """
-    from typing import Any
     from langchain_core.tools import StructuredTool
-    from pydantic import BaseModel, Field, create_model
+    from pydantic import Field, create_model
 
     schema = spec.input_schema or {"type": "object", "properties": {}}
     props = schema.get("properties", {}) or {}
@@ -175,7 +267,15 @@ def _to_lc_tool(spec: ToolSpec):
 
     ArgsModel = create_model(f"{spec.name}_args", **field_defs)
 
-    def _placeholder(**kwargs):
+    def _placeholder(**kwargs: Any) -> dict[str, Any]:
+        """``StructuredTool`` 占位函数:收下 kwargs 后原样返回,不真执行。
+
+        Args:
+            **kwargs: 由 LangChain 按 ``ArgsModel`` 字段展开后的参数。
+
+        Returns:
+            dict[str, Any]: 原样返回 ``kwargs``,供上层 LLM 看参数示例。
+        """
         return kwargs
 
     return StructuredTool.from_function(
@@ -191,12 +291,33 @@ _MINIMAXI_ALIASES = {"minimaxi", "minimax", "minimax-ai", "minimax_ai"}
 
 
 def _normalize_provider(provider: str) -> str:
+    """把 provider 别名统一映射到 ``"minimaxi"`` 规范名。
+
+    历史注册时曾用过 ``"minimax"`` / ``"minimax-ai"`` / ``"minimax_ai"``,
+    全部视为同一家的别名,避免上游改名后还要逐处替换。
+
+    Args:
+        provider: 原始 provider 字符串 (来自 settings / 环境变量)。
+
+    Returns:
+        str: 命中别名集合时返回 ``"minimaxi"``,否则原样返回。
+    """
     if provider in _MINIMAXI_ALIASES:
         return "minimaxi"
     return provider
 
 
 def get_backend() -> BackendProtocol:
+    """根据 settings 选 mock / 真实 backend。
+
+    决策顺序:
+      * provider 显式为 ``"mock"`` → :class:`MockBackend`;
+      * ``active_api_key`` 为空 → :class:`MockBackend` (无 key 调不通,直接 mock);
+      * 其它 → :class:`LangChainBackend` (走 LangChain ChatOpenAI)。
+
+    Returns:
+        BackendProtocol: 满足协议的后端实例,直接 ``chat`` / ``stream_chat`` 即可。
+    """
     s = get_settings()
     provider = _normalize_provider(s.llm_provider)
     if provider == "mock":
