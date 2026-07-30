@@ -66,7 +66,21 @@ class Snapshot:
 
 
 class SideGit:
-    def __init__(self, repo_root: Path | None = None):
+    def __init__(self, repo_root: Path | None = None) -> None:
+        """SideGit 初始化：缓存仓库根与 settings, 不触发任何 git IO。
+
+        ``is_repo`` / ``ensure_repo`` 等方法才会真正探测或初始化 git 仓库,
+        本方法只是把路径和配置对象挂到实例上, 方便后续按需使用。
+
+        Args:
+            repo_root: 显式仓库根目录; ``None`` 时走 ``settings.repo_root``。
+                上游常用 ``Path(__file__).parents[2]`` 之类解析出的绝对路径
+                显式传入, 避免 settings 在某些嵌套 import 顺序下尚未初始化。
+
+        Side effects:
+            设置实例属性 ``self.root`` (强制 :class:`pathlib.Path`, 由
+            ``Path | str`` 兜底) 和 ``self.settings``。无文件系统 / git 副作用。
+        """
         s = get_settings()
         self.root = repo_root or s.repo_root
         self.settings = s

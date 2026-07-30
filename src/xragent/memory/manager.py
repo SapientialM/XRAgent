@@ -89,7 +89,7 @@ class MemoryManager:
         "ON facts(last_accessed_ts ASC)",
     ]
 
-    def __init__(self, db_path=None) -> None:
+    def __init__(self, db_path: str | None = None) -> None:
         """打开 SQLite 连接, 初始化 schema 并跑一遍所有 migration。
 
         DB 来源优先级: 显式 ``db_path`` > ``settings.memory_db`` (通常为
