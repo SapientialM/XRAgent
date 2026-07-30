@@ -70,6 +70,26 @@ class MemoryManager:
     # 5. Old single-column idx_facts_category is a prefix of the composite and is
     #    therefore redundant; existing DBs may still carry it (harmless).
 
+    # SELECT 投影顺序约定：所有 SELECT 都要按这个 tuple 顺序输出, _row_to_fact 才能
+    # 用 fixed indices 还原 Fact。新加列必须追加在末尾 + 同步更新本约定。
+    _FACT_COLUMNS = ("id", "ts", "category", "content", "source_turn", "source_turn_idx")
+
+    @staticmethod
+    def _row_to_fact(row: tuple) -> Fact:
+        """DB 行 → Fact 还原。``_FACT_COLUMNS`` 是投影顺序契约, 改 SELECT 时同步改。
+
+        抽到此处前 4 个召回方法 (recall/recall_range/recall_by_turn_idx/recent) 各写
+        一份 7 行 ``Fact(id=r[0], ts=r[1], ...)``, 加列时容易漏一处; 集中后只改一处。
+        """
+        return Fact(
+            id=row[0],
+            ts=row[1],
+            category=row[2],
+            content=row[3],
+            source_turn=row[4],
+            source_turn_idx=row[5],
+        )
+
     def __init__(self, db_path: Path | None = None):
         s = get_settings()
         self.db_path = db_path or s.memory_db
@@ -145,17 +165,7 @@ class MemoryManager:
         sql += " ORDER BY ts DESC LIMIT ?"
         params.append(k)
         rows = self._conn.execute(sql, params).fetchall()
-        return [
-            Fact(
-                id=r[0],
-                ts=r[1],
-                category=r[2],
-                content=r[3],
-                source_turn=r[4],
-                source_turn_idx=r[5],
-            )
-            for r in rows
-        ]
+        return [self._row_to_fact(r) for r in rows]
 
     def recall_range(
         self,
@@ -191,17 +201,7 @@ class MemoryManager:
         sql += " ORDER BY ts DESC LIMIT ?"
         params.append(k)
         rows = self._conn.execute(sql, params).fetchall()
-        return [
-            Fact(
-                id=r[0],
-                ts=r[1],
-                category=r[2],
-                content=r[3],
-                source_turn=r[4],
-                source_turn_idx=r[5],
-            )
-            for r in rows
-        ]
+        return [self._row_to_fact(r) for r in rows]
 
     def top_frequent(
         self,
@@ -241,17 +241,7 @@ class MemoryManager:
             "ORDER BY ts DESC LIMIT ?",
             (turn_idx, k),
         ).fetchall()
-        return [
-            Fact(
-                id=r[0],
-                ts=r[1],
-                category=r[2],
-                content=r[3],
-                source_turn=r[4],
-                source_turn_idx=r[5],
-            )
-            for r in rows
-        ]
+        return [self._row_to_fact(r) for r in rows]
 
     def recent(self, n: int = 20) -> list[Fact]:
         rows = self._conn.execute(
@@ -259,17 +249,7 @@ class MemoryManager:
             "FROM facts ORDER BY ts DESC LIMIT ?",
             (n,),
         ).fetchall()
-        return [
-            Fact(
-                id=r[0],
-                ts=r[1],
-                category=r[2],
-                content=r[3],
-                source_turn=r[4],
-                source_turn_idx=r[5],
-            )
-            for r in rows
-        ]
+        return [self._row_to_fact(r) for r in rows]
 
     def count(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
