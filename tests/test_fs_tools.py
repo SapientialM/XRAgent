@@ -17,15 +17,23 @@
     - 路径指向文件 → ok=False（因为 is_dir() == False）
     - 路径缺失也走 "不是目录" 同一条 false 分支
     - 路径越出 repo_root → ok=False 含 "目标越界"
+* _resolve_inside / _resolve_writable（白盒）
+    - 仓库内路径 → (Path, None)
+    - 越界路径 → (None, 错误文案)
+    - 黑名单命中（write 系列：.env）→ (None, 错误文案)
 
-不在本测试覆盖：write_file（高危，已被 test_hitl 间接覆盖）、二进制
-解码错误（实现细节、易变）。
+不在本测试覆盖：二进制解码错误（实现细节、易变）。
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-from xragent.tools.fs_tools import list_dir, read_file
+from xragent.tools.fs_tools import (
+    _resolve_inside,
+    _resolve_writable,
+    list_dir,
+    read_file,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -132,3 +140,56 @@ def test_list_dir_outside_repo_is_blocked(repo_root: Path):
     out = list_dir("/")
     assert out["ok"] is False
     assert "目标越界" in out["error"]
+
+
+# ---------------------------------------------------------------------------
+# _resolve_inside / _resolve_writable  (白盒: refactor 行为锁)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_inside_inside_repo_returns_target_no_error(repo_root: Path):
+    """仓库内路径 → (target, None), target.name 准确。"""
+    (repo_root / "sandbox" / "note.txt").write_text("x", encoding="utf-8")
+    target, err = _resolve_inside("sandbox/note.txt")
+    assert err is None
+    assert target is not None
+    assert target.name == "note.txt"
+
+
+def test_resolve_inside_outside_repo_returns_none_with_error(repo_root: Path):
+    """越界路径 → (None, 错误文案);文案锁 '目标越界'。"""
+    target, err = _resolve_inside("/etc/passwd")
+    assert target is None
+    assert err is not None
+    assert "目标越界" in err
+
+
+def test_resolve_inside_parent_traversal_is_blocked(repo_root: Path):
+    """../ 逃逸同路径围栏逻辑, 也走同一条失败分支。"""
+    target, err = _resolve_inside("../evil.txt")
+    assert target is None
+    assert err is not None
+    assert "目标越界" in err
+
+
+def test_resolve_writable_blocks_blacklisted_dotenv(repo_root: Path):
+    """_resolve_writable 走 assert_writable: write_blacklist 里的 .env 必须被拒。
+
+    AGENTS.md 当前不在 write_blacklist (settings.write_blacklist), 所以
+    这里用 .env 锁"黑名单拦截"。这是 read / write 黑名单分裂的核心契约:
+    read_file 路径放行 .env (上面没有这条断言), write_file 必须拦截。
+    """
+    (repo_root / ".env").write_text("SECRET=1", encoding="utf-8")
+    target, err = _resolve_writable(".env")
+    assert target is None
+    assert err is not None
+    assert isinstance(err, str) and err != ""
+    assert "受保护" in err
+
+
+def test_resolve_writable_on_normal_path_returns_target(repo_root: Path):
+    """非黑名单的普通路径 → (target, None)。"""
+    target, err = _resolve_writable("sandbox/will_be_written.txt")
+    assert err is None
+    assert target is not None
+    assert target.name == "will_be_written.txt"
