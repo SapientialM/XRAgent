@@ -11,8 +11,13 @@ from ..core.dream import assemble_system_prompt
 from ..core.turn import TraceRecorder, TurnRecord, new_turn_id
 from ..hitl.gate import HitlGate
 from ..memory.manager import MemoryManager
-from ..snapshot.side_git import SideGit
+from ..snapshot.side_git import SideGit, Snapshot
 from ..tools.registry import ToolRegistry, build_default_registry
+
+
+# user_text 在 snapshot note 里的截断长度,沿用原 magic number;集中到模块顶层常量
+# 便于日后统一调整(若 turn_id 长度策略变更,只需改一处)。
+_USER_TEXT_NOTE_MAX = 40
 
 
 def make_tool_message(tool_call_id: str, content: Any) -> Message:
@@ -194,6 +199,28 @@ class ReActLoop:
             self.backend = get_backend()
         return self.backend
 
+    def _snapshot(self, turn_id: str, label: str, user_text: str) -> Snapshot:
+        """封装 ``self.snapshot.snapshot`` 调用模板,统一 note 格式与 tag 策略。
+
+        把 :meth:`SideGit.snapshot` 的两组 magic 元素 (note 模板 ``"<label>-turn:<前40字>"``
+        与 ``tag=self.tag_snapshots``) 收敛到一处;Run 流程里只关心"什么时候
+        打快照"和"哪个阶段",不重复写 kwarg。
+
+        Args:
+            turn_id: turn 时间格式 ID;post-turn 调用方追加 ``"-post"`` 后传入。
+            label: 阶段标签,典型值 ``"pre"`` / ``"post"``,出现在 note 前缀。
+            user_text: 当前 turn 用户输入;截断前 40 字符拼入 note。
+
+        Returns:
+            :class:`~xragent.snapshot.side_git.Snapshot`: 与
+            :meth:`SideGit.snapshot` 一致。
+        """
+        return self.snapshot.snapshot(
+            turn_id,
+            note=f"{label}-turn:{user_text[:_USER_TEXT_NOTE_MAX]}",
+            tag=self.tag_snapshots,
+        )
+
     def run(self, user_text: str, session_messages: list[Message] | None = None) -> dict:
         """跑一轮 ReAct:装配 system prompt → 调 backend → 执行工具 → 收口。
 
@@ -218,7 +245,7 @@ class ReActLoop:
         backend = self._ensure_backend()
         s = self.settings
         turn_id = new_turn_id()
-        snap = self.snapshot.snapshot(turn_id, note=f"pre-turn:{user_text[:40]}", tag=self.tag_snapshots)
+        snap = self._snapshot(turn_id, "pre", user_text)
 
         messages: list[Message] = session_messages or []
         if not messages or messages[0].role != "system":
@@ -270,7 +297,7 @@ class ReActLoop:
             wall_ms, tokens_in, tokens_out, error,
         )
 
-        self.snapshot.snapshot(turn_id + "-post", note=f"post-turn:{user_text[:40]}", tag=self.tag_snapshots)
+        self._snapshot(turn_id + "-post", "post", user_text)
 
         return {
             "turn_id": turn_id, "answer": final_content,
