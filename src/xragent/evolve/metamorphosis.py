@@ -2,12 +2,33 @@
 from __future__ import annotations
 
 import py_compile
+from pathlib import Path
 from typing import Any
 
 from ..config.settings import get_settings
 from ..snapshot.side_git import SideGit
 from ..watchdog.runtime_state import read as rs_read, write as rs_write
 from .generations import append_generation
+
+
+def _compile_one(py: Path, repo_root: Path) -> dict[str, Any]:
+    """对单个 .py 跑 ``py_compile`` 并返回结果记录。
+
+    Args:
+        py: 待编译的 .py 路径（绝对）。
+        repo_root: 用于把绝对路径转 ``str(Path.relative_to(repo_root))``，
+            方便 JSONL 日志肉眼可读。
+
+    Returns:
+        形如 ``{"file": <rel-path>, "ok": True}``；编译失败时再加
+        ``"error": <str>``，与原 schema 完全兼容（test_evolve_tools 锁住）。
+    """
+    rel = str(py.relative_to(repo_root))
+    try:
+        py_compile.compile(str(py), doraise=True)
+        return {"file": rel, "ok": True}
+    except py_compile.PyCompileError as e:
+        return {"file": rel, "ok": False, "error": str(e)}
 
 
 def metamorphose(reason: str, entry: str = "src/xragent/main.py") -> dict[str, Any]:
@@ -44,14 +65,11 @@ def metamorphose(reason: str, entry: str = "src/xragent/main.py") -> dict[str, A
     if commit_hash is None:
         commit_hash = head_before
     push_ok, push_msg = sg.push()
-    compile_results: list[dict[str, Any]] = []
-    src_dir = s.repo_root / "src"
-    for py in src_dir.rglob("*.py"):
-        try:
-            py_compile.compile(str(py), doraise=True)
-            compile_results.append({"file": str(py.relative_to(s.repo_root)), "ok": True})
-        except py_compile.PyCompileError as e:
-            compile_results.append({"file": str(py.relative_to(s.repo_root)), "ok": False, "error": str(e)})
+    # list comp + helper：消掉原循环里 try/except 两支各重复算 relative_to 的样板。
+    compile_results: list[dict[str, Any]] = [
+        _compile_one(py, s.repo_root)
+        for py in (s.repo_root / "src").rglob("*.py")
+    ]
     compile_ok = all(r["ok"] for r in compile_results)
     rec = append_generation(
         from_head=commit_hash, to_ref=commit_hash, reason=reason,
