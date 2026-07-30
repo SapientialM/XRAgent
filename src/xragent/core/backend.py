@@ -75,12 +75,19 @@ class MockBackend:
         """
         self.script_path = script_path or _MOCK_RESPONSES_PATH
         self._cursor = 0
-        self._script = []
         if self.script_path and os.path.exists(self.script_path):
-            for line in open(self.script_path).read().splitlines():
-                line = line.strip()
-                if line:
-                    self._script.append(self._parse_line(line))
+            # ``with`` + 显式 ``encoding="utf-8"``: 修 file handle 泄漏 +
+            # 兼容 BOM (边界条件: Windows 记事本 / Excel 导出可能带 BOM)。
+            # list comp 里用 walrus ``:=`` 把 strip 结果绑到 ``line``, 空行被过滤,
+            # 坏行仍走 ``json.loads`` 抛 JSONDecodeError (锁 ``test_invalid_json_line_raises``)。
+            with open(self.script_path, encoding="utf-8") as f:
+                self._script = [
+                    self._parse_line(line)
+                    for raw in f
+                    if (line := raw.strip())
+                ]
+        else:
+            self._script = []
         if not self._script:
             self._script = [self._parse_line_obj(o) for o in self.DEFAULT_SCRIPT]
 
