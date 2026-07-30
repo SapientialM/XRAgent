@@ -54,6 +54,28 @@ def _spawn_child(extra_args: list[str] | None = None) -> subprocess.Popen:
 
 
 def run_forever() -> None:
+    """守护主循环：拉起子 Agent、监控心跳、超时重启。
+
+    流程（每轮迭代）:
+        1. 写 ``runtime_state.json`` 标记 supervisor 自己存活 (供外部探活)。
+        2. 若 ``runtime_state.restart_suppressed`` 为真 → 退出 (parents 主动停机信号)。
+        3. ``waitpid(-1, WNOHANG)`` 收割所有 zombie 子进程。
+        4. ``_spawn_child()`` 拉起新子进程, 父进程与子进程同 session 组
+           (``start_new_session=True``), 便于用 ``killpg`` 整组杀。
+        5. 内层循环每 ``heartbeat_interval_s`` 醒来一次:
+             * 子进程 ``poll()`` 返回非 None → 自然退出, 准备下一轮
+             * ``runtime_state.heartbeat_ts`` 超 ``heartbeat_timeout_s`` 未更新
+               → 心跳超时, ``SIGTERM`` 杀进程组, break
+             * KeyboardInterrupt (Ctrl-C) → 杀进程组后 return
+        6. 退出码 != 0 → ``failures += 1``, 指数退避重启 (上限 30s);
+           累计到 ``restart_max_failures`` 时整体退出。
+           退出码 == 0 且 ``restart_suppressed`` → 退出 (干净关机路径)。
+
+    Returns:
+        None. 该函数只在以下两种情况下返回:
+            * 收到 ``restart_suppressed`` 标志 (parents 主动停机)
+            * 连续 ``restart_max_failures`` 次重启失败, 放弃自愈
+    """
     s = get_settings()
     failures = 0
     while True:
@@ -133,6 +155,16 @@ def run_forever() -> None:
 
 
 def main() -> None:
+    """supervisor CLI 入口: 解析参数, 选择 ``run_forever()`` 还是单次 smoke。
+
+    命令行参数:
+        ``--once``: 不进守护循环, 直接 ``_spawn_child(["--smoke"])`` 跑一次子
+        进程并 ``child.wait()``, 把子进程 returncode 作为本进程退出码返回。
+        供 CI / 一次性排错用。
+
+    退出码: 与被包装的子进程退出码一致 (无 ``--once`` 时, ``run_forever``
+    永不返回直到触发停机信号)。
+    """
     parser = argparse.ArgumentParser(description="XRAgent supervisor (24h watchdog)")
     parser.add_argument("--once", action="store_true", help="跑一次就退出")
     args = parser.parse_args()
