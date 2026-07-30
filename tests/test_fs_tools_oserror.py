@@ -7,8 +7,9 @@
 
 * read_file 遇到 OSError → ok=False + error 含 "读取失败"
 * write_file 遇到 OSError（mkdir / write_text） → ok=False + error 含 "写入失败"
+* list_dir 遇到 OSError (iterdir) → ok=False + error 含 "列出失败"
 
-通过 monkeypatch target.read_text / target.write_text 让它们抛 OSError，
+通过 monkeypatch target.read_text / target.write_text / Path.iterdir 让它们抛 OSError，
 避免依赖真实文件系统权限。
 """
 from __future__ import annotations
@@ -67,6 +68,26 @@ def test_write_file_returns_ok_false_when_mkdir_raises(repo_root: Path, monkeypa
     out = write_file("sandbox/some/new.txt", "data")
     assert out["ok"] is False
     assert "写入失败" in out["error"]
+
+
+def test_list_dir_returns_ok_false_when_iterdir_raises(repo_root: Path, monkeypatch):
+    """iterdir 抛 PermissionError → ok=False + error 含 "列出失败"。
+
+    跟 read_file / write_file 同套路：``Path.iterdir`` 抛 OSError 时不能
+    把异常冒到 LLM 层；LLM 看到的应该是 ``{"ok": False, "error": ...}``。
+    """
+    target = repo_root / "sandbox"
+    target.mkdir(exist_ok=True)
+
+    def boom(self, *args, **kwargs):  # noqa: ARG001
+        raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "iterdir", boom)
+
+    out = list_dir("sandbox")
+    assert out["ok"] is False
+    assert "列出失败" in out["error"]
+    assert "Permission denied" in out["error"]
 
 
 def test_list_dir_unchanged_on_oserror_free_path(repo_root: Path):
