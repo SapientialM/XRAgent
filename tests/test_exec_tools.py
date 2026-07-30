@@ -79,6 +79,63 @@ class TestTruncateOutput:
         assert "12345" in out
 
 
+
+# -------------------- _coerce_int --------------------
+
+class TestCoerceInt:
+    """覆盖 _coerce_int helper 的兜底矩阵。
+
+    设计目标: 工具 handler 入参校验应该"宽容 + 兜底", 而不是 TypeError
+    冒到 LLM 面前。这里枚举所有从 LLM 端可能传过来的坏值。
+    """
+
+    def test_int_passthrough(self) -> None:
+        assert exec_tools._coerce_int(5, 30) == 5
+        assert exec_tools._coerce_int(1, 30) == 1
+
+    def test_float_truncates_to_int(self) -> None:
+        # 5.7 → 5; 工具层不挑舍入策略, 用 int() 的趋零截断即可
+        assert exec_tools._coerce_int(5.7, 30) == 5
+        assert exec_tools._coerce_int(0.9, 30) == 0  # 但会触发 min_value 兜底
+
+    def test_bool_falls_back_to_default(self) -> None:
+        # 关键: bool 是 int 子类, 必须显式拒绝 — True 会被语义化成"无限"
+        # timeout, 远比一个默认值危险
+        assert exec_tools._coerce_int(True, 30) == 30
+        assert exec_tools._coerce_int(False, 30) == 30
+
+    def test_none_falls_back_to_default(self) -> None:
+        assert exec_tools._coerce_int(None, 30) == 30
+
+    def test_string_falls_back_to_default(self) -> None:
+        # 不解析字符串数字 — 调用方应该 int() 完再传
+        assert exec_tools._coerce_int("5", 30) == 30
+        assert exec_tools._coerce_int("", 30) == 30
+
+    def test_list_dict_falls_back_to_default(self) -> None:
+        assert exec_tools._coerce_int([5], 30) == 30
+        assert exec_tools._coerce_int({"x": 5}, 30) == 30
+
+    def test_below_min_value_falls_back_to_default(self) -> None:
+        # min_value=1 时, 0 / 负数 / 0.9 都 fallback — 避免
+        # subprocess.run(timeout=0) 立刻 ValueError
+        assert exec_tools._coerce_int(0, 30, min_value=1) == 30
+        assert exec_tools._coerce_int(-1, 30, min_value=1) == 30
+        assert exec_tools._coerce_int(-100, 30, min_value=1) == 30
+
+    def test_at_min_value_kept(self) -> None:
+        # min_value 边界: == min_value 应该保留, 不该 fallback
+        assert exec_tools._coerce_int(1, 30, min_value=1) == 1
+
+    def test_default_min_value_is_zero(self) -> None:
+        # 默认 min_value=0: 0 是合法值, head_chars=0 必须能被保留
+        # (这是 _truncate_output 向后兼容的关键)
+        assert exec_tools._coerce_int(0, 30) == 0
+
+    def test_very_large_int_kept(self) -> None:
+        # LLM 偶尔会脑抽传一个巨大的整数, 只要 >= min_value 就原样保留
+        assert exec_tools._coerce_int(10_000_000, 30) == 10_000_000
+
 # -------------------- _truncate_output: head + tail 双段 --------------------
 
 class TestTruncateOutputHeadTail:
@@ -138,6 +195,19 @@ class TestTruncateOutputHeadTail:
         assert "..." in out
         assert "900" in out  # 省略的字数 = 1000 - 50 - 50
 
+
+
+    def test_negative_tail_falls_back_to_default(self) -> None:
+        # 负 tail_chars 兜底到 OUTPUT_TAIL_LIMIT
+        long_s = "x" * 10_000
+        out = exec_tools._truncate_output(long_s, head_chars=0, tail_chars=-5)
+        assert len(out) == exec_tools.OUTPUT_TAIL_LIMIT
+
+    def test_string_tail_falls_back_to_default(self) -> None:
+        # 字符串 tail_chars 兜底, 不会试图"100 字"这样
+        long_s = "x" * 10_000
+        out = exec_tools._truncate_output(long_s, head_chars=0, tail_chars="oops")  # type: ignore[arg-type]
+        assert len(out) == exec_tools.OUTPUT_TAIL_LIMIT
 
 # -------------------- _fail --------------------
 
@@ -228,6 +298,19 @@ class TestRunCmdTimeoutS:
         exec_tools.run_cmd("true")
         assert captured["kwargs"]["cwd"] == str(fake_settings.repo_root)
 
+
+
+    def test_bool_timeout_falls_back_to_default(self, monkeypatch, fake_settings) -> None:
+        # 单独拎出来: bool 是 int 子类, _coerce_int 必须显式拒绝
+        seen: list[int] = []
+
+        def fake_run(cmd, **kwargs):
+            seen.append(kwargs["timeout"])
+            return _fake_completed()
+
+        monkeypatch.setattr(exec_tools.subprocess, "run", fake_run)
+        exec_tools.run_cmd("true", timeout_s=True)  # type: ignore[arg-type]
+        assert seen == [30]
 
 # -------------------- run_cmd: output_head_chars / output_tail_chars 透传 --------------------
 
