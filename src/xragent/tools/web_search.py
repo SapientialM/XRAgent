@@ -9,11 +9,17 @@
   覆盖 loopback / link-local / 元数据地址.
 * 留痕: 每次抓取 / 搜索都往 ``diary/search-log.md`` 追加一行, 便于事后审计.
 * 状态文件: 全部走 ``_update_state`` 集中写, 避免散落的 read-modify-write.
+* **v0.5.6 timeout**: ``curl_url`` 与 ``web_search`` 新增 ``timeout_s`` 参数,
+  与 ``git_push`` 的 ``_resolve_timeout`` + ``_fail`` 工厂同形, 失败路径
+  区分 *超时* 与 *其他网络错* (返回 envelope 多一个 ``timed_out=True``).
+  此前两个工具都 hardcode ``REQUEST_TIMEOUT_S=20``, Agent 没法在网络抖动
+  时缩短超时加快反馈, 也没法在目标站慢响应时拉长超时拿到内容.
 """
 from __future__ import annotations
 
 import json
 import re
+import socket
 import time
 import urllib.parse
 import urllib.request
@@ -24,8 +30,11 @@ from urllib.error import HTTPError, URLError
 # 常量 (单一来源, 测试与文档都引用这里)
 # ---------------------------------------------------------------------------
 
-#: 单次 urlopen 超时 (秒); 抓 DuckDuckGo HTML / 通用 GET 都用同一值.
-REQUEST_TIMEOUT_S: int = 20
+#: ``curl_url`` / ``web_search`` 缺省 urlopen 超时 (秒). ``DEFAULT_CURL_TIMEOUT_S``
+#: 是 Agent 不传 ``timeout_s`` 时回退到的值; ``REQUEST_TIMEOUT_S`` 仍是底层
+#: ``urlopen`` 的硬上限 (二者相等, 改一处即可).
+DEFAULT_CURL_TIMEOUT_S: int = 20
+REQUEST_TIMEOUT_S: int = DEFAULT_CURL_TIMEOUT_S
 
 #: HTTP 响应体在返回 envelope 里的最大字符数; 超过则截断避免内存炸.
 MAX_BODY_CHARS: int = 8000
@@ -67,6 +76,43 @@ _SENSITIVE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(password\s*[:=]\s*['\"]?[^\s'\"]{6,})", re.IGNORECASE),
     re.compile(r"(AKIA[0-9A-Z]{16})"),  # AWS access key
 )
+
+
+# ---------------------------------------------------------------------------
+# 公共 helper — 与 fs_tools / git_tools 的 _fail / _resolve_timeout 同形
+# ---------------------------------------------------------------------------
+
+
+def _fail(msg: str, /, **extras: Any) -> dict[str, Any]:
+    """``ok=False`` 字典工厂. ``msg`` positional-only 必填, 写入 ``error`` 键.
+
+    ``**extras`` 显式传入才出现, 默认空. 本工具的失败 envelope 历史上一直
+    用 ``error`` 字段 (与 ``fs_tools._fail`` 一致, 与 ``git_tools._fail``
+    用的 ``msg`` 字段不同), 改键名会破坏 ``test_web_search.py`` 里所有
+    ``assert "xxx" in r["error"]`` 的断言, 因此此处保留 ``error``.
+    """
+    out: dict[str, Any] = {"ok": False, "error": msg}
+    out.update(extras)
+    return out
+
+
+def _resolve_timeout(value: object, *, default: int) -> int:
+    """归一化 timeout 输入到合法正整数.
+
+    拒绝: ``None`` / ``bool`` (Python 里 ``bool`` 是 ``int`` 子类, 必须先排除
+    否则 ``True`` 会被当 ``1``) / 非 ``int | float`` / 非正数 (含 0).
+    通过: 其他 ``int | float`` → ``int(value)`` (浮点截断).
+
+    与 ``git_tools._resolve_timeout`` 形态一致, 失败时一律走 ``default``,
+    不抛异常 — LLM 传错类型时不应让整次工具调用崩掉.
+    """
+    if value is None or isinstance(value, bool):
+        return default
+    if not isinstance(value, (int, float)):
+        return default
+    if value <= 0:
+        return default
+    return int(value)
 
 
 # ---------------------------------------------------------------------------
@@ -185,62 +231,80 @@ def _log_request(url: str, status: int | None, body_excerpt: str, note: str = ""
 # ---------------------------------------------------------------------------
 
 
-def curl_url(url: str, method: str = "GET", data: str = "") -> dict[str, Any]:
+def curl_url(
+    url: str,
+    method: str = "GET",
+    data: str = "",
+    timeout_s: int | float | None = DEFAULT_CURL_TIMEOUT_S,
+) -> dict[str, Any]:
     """抓取一个 URL 并返回 ``{ok, status, body, error?}``.
 
     Args:
         url: 目标 URL; 必须是 http(s), 长度 < ``MAX_URL_LEN``, 不在 SSRF 黑名单里.
         method: ``GET`` 或 ``POST``.
         data: POST body; 仅 method=POST 时使用.
+        timeout_s: urlopen 超时秒数. ``None`` / 非数值 / 非正数 →
+            :data:`DEFAULT_CURL_TIMEOUT_S` (20s). 超时时返回 ``ok=False,
+            error="超时（>Ns）", timed_out=True``, 不抛异常 — 这是为防止
+            网络卡住时 LLM 工具调用无限阻塞.
 
     Returns:
         成功: ``{"ok": True, "status": int, "body": str}``
-        失败: ``{"ok": False, "error": str}`` (含 rate_limited / sensitive / ssrf_blocked)
+        失败: ``{"ok": False, "error": str}`` (含 rate_limited / sensitive /
+            ssrf_blocked / 超时 / 其他网络错). 超时分支额外带 ``timed_out=True``.
     """
     # --- 1. 限流 ---
     allowed, wait_s = _check_rate_limit()
     if not allowed:
         msg = f"距上次抓取不足 {RATE_LIMIT_COOLDOWN_S:.0f}s, 需再等 {wait_s:.1f}s"
         _log_request(url, None, msg, note="rate_limited")
-        return {"ok": False, "error": msg, "wait_s": wait_s}
+        return _fail(msg, wait_s=wait_s)
 
     # --- 2. 基础校验 ---
     if len(url) > MAX_URL_LEN:
-        return {"ok": False, "error": f"URL 过长 (> {MAX_URL_LEN})"}
+        return _fail(f"URL 过长 (> {MAX_URL_LEN})")
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https"):
-        return {"ok": False, "error": f"scheme 不允许: {parsed.scheme!r}"}
+        return _fail(f"scheme 不允许: {parsed.scheme!r}")
     if not parsed.netloc:
-        return {"ok": False, "error": "缺少 host"}
+        return _fail("缺少 host")
 
     # --- 3. 敏感词扫描 ---
     combined = url + "\n" + data
     sens = _is_sensitive(combined)
     if sens:
         _log_request(url, None, sens, note="sensitive")
-        return {"ok": False, "error": sens}
+        return _fail(sens)
 
     # --- 4. SSRF ---
     host = parsed.hostname or ""
     if _is_blocked_host(host):
         msg = f"SSRF 黑名单拦截 host={host!r}"
         _log_request(url, None, msg, note="ssrf_blocked")
-        return {"ok": False, "error": msg}
+        return _fail(msg)
 
     # --- 5. 执行 ---
+    effective_timeout = _resolve_timeout(timeout_s, default=DEFAULT_CURL_TIMEOUT_S)
     req = urllib.request.Request(url, data=data.encode("utf-8") if data else None,
                                   method=method.upper())
     req.add_header("User-Agent", USER_AGENT)
     try:
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
+        with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
             status = resp.status
     except HTTPError as e:
         body = e.read().decode("utf-8", errors="replace") if e.fp else ""
         status = e.code
-    except (URLError, TimeoutError, OSError) as e:
+    except (TimeoutError, socket.timeout) as e:
+        # 与 ``(URLError, OSError)`` 顺序: ``TimeoutError`` / ``socket.timeout``
+        # 都继承自 ``OSError``, 必须先匹配, 否则会被下一条 except 吞掉归到
+        # 普通网络错, 丢 ``timed_out=True`` 信号.
+        msg = f"超时（>{effective_timeout}s）"
+        _log_request(url, None, f"{type(e).__name__}: {e}", note="timeout")
+        return _fail(msg, timed_out=True)
+    except (URLError, OSError) as e:
         _log_request(url, None, f"{type(e).__name__}: {e}", note="network_error")
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        return _fail(f"{type(e).__name__}: {e}")
 
     truncated = body[:MAX_BODY_CHARS]
     _log_request(url, status, truncated, note="")
@@ -248,38 +312,51 @@ def curl_url(url: str, method: str = "GET", data: str = "") -> dict[str, Any]:
     return {"ok": True, "status": status, "body": truncated}
 
 
-def web_search(query: str, top_k: int = 5) -> dict[str, Any]:
+def web_search(
+    query: str,
+    top_k: int = 5,
+    timeout_s: int | float | None = DEFAULT_CURL_TIMEOUT_S,
+) -> dict[str, Any]:
     """DuckDuckGo HTML 搜索 (无需 API key), 解析后取前 ``top_k`` 条.
 
     Args:
         query: 搜索词.
         top_k: 返回结果数; 1 <= top_k <= 20.
+        timeout_s: urlopen 超时秒数. ``None`` / 非数值 / 非正数 →
+            :data:`DEFAULT_CURL_TIMEOUT_S` (20s). 超时时返回 ``ok=False,
+            error="超时（>Ns）", timed_out=True``, 不抛异常.
 
     Returns:
         成功: ``{"ok": True, "results": [{"title": str, "url": str, "snippet": str}, ...]}``
-        失败: ``{"ok": False, "error": str}`` (rate_limited / sensitive / network)
+        失败: ``{"ok": False, "error": str}`` (rate_limited / sensitive / 超时 /
+            其他网络错). 超时分支额外带 ``timed_out=True``.
     """
     if not 1 <= top_k <= 20:
-        return {"ok": False, "error": f"top_k 越界: {top_k}"}
+        return _fail(f"top_k 越界: {top_k}")
 
     allowed, wait_s = _check_rate_limit()
     if not allowed:
         msg = f"距上次抓取不足 {RATE_LIMIT_COOLDOWN_S:.0f}s, 需再等 {wait_s:.1f}s"
-        return {"ok": False, "error": msg, "wait_s": wait_s}
+        return _fail(msg, wait_s=wait_s)
 
     sens = _is_sensitive(query)
     if sens:
-        return {"ok": False, "error": sens}
+        return _fail(sens)
 
     url = "https://duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
+    effective_timeout = _resolve_timeout(timeout_s, default=DEFAULT_CURL_TIMEOUT_S)
     req = urllib.request.Request(url)
     req.add_header("User-Agent", USER_AGENT)
     try:
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
+        with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
             html = resp.read().decode("utf-8", errors="replace")
-    except (URLError, TimeoutError, OSError) as e:
+    except (TimeoutError, socket.timeout) as e:
+        msg = f"超时（>{effective_timeout}s）"
+        _log_request(url, None, f"{type(e).__name__}: {e}", note="timeout")
+        return _fail(msg, timed_out=True)
+    except (URLError, OSError) as e:
         _log_request(url, None, f"{type(e).__name__}: {e}", note="network_error")
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        return _fail(f"{type(e).__name__}: {e}")
 
     results = _parse_ddg_html(html, top_k=top_k)
     _log_request(url, 200, f"q={query!r} hits={len(results)}", note="search")
