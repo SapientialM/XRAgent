@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -152,7 +152,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="before")
     @classmethod
-    def _backfill_jacecli_env(cls, values):
+    def _backfill_jacecli_env(cls, values: Any) -> Any:
         """兼容 JaceCLI 风格 env var（无 XRAGENT_ 前缀）。
 
         如果 pydantic-settings 没从 XRAGENT_MINIMAXI_API_KEY 读到 key，

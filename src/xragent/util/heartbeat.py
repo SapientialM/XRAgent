@@ -81,6 +81,19 @@ def start_heartbeat_thread(
     """
 
     def _loop() -> None:
+        """心跳线程主体。
+
+        行为契约（见模块 docstring 的"边界"一节）：
+
+        1. 循环开头先检查 ``stop_predicate()``，避免停后还多调一次
+           ``rs.heartbeat()``。
+        2. ``rs.heartbeat()`` 抛任何异常都吞掉——心跳失败不能让守护线程
+           崩，失败信息由 ``runtime_state`` 自己落盘。
+        3. ``wait(interval_s)`` 之前再查一次 ``stop_predicate()``，确保
+           退出时不会卡在 wait 上多撑一个 interval。
+
+        闭包捕获 ``stop_predicate`` + ``interval_s``，不在外层暴露。
+        """
         while not stop_predicate():
             try:
                 rs.heartbeat()
