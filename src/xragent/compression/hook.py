@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .simple import SimpleCompression
+
 REGISTRY: dict[str, type[Any]] = {}
 
 
@@ -36,6 +38,5 @@ def get(name: str) -> type[Any]:
     return REGISTRY[name]
 
 
-from .simple import SimpleCompression  # noqa: E402
-
+# 默认注册 "simple"，Agent 启动即可使用；测试可继续 ``register("simple", X)`` 覆盖。
 register("simple", SimpleCompression)
