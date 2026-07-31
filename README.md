@@ -104,7 +104,7 @@ XRAgent/
 ├── runtime_state.json              # 心跳 / 世代谱 / 终止开关
 ├── src/xragent/
 │   ├── core/      (dream / backend / react_loop / turn)
-│   ├── tools/     (registry.ToolRegistry + 17 工具 + blacklist；内部展开见 ADR-0011)
+│   ├── tools/     (registry + 9 工具 + blacklist)
 │   ├── memory/    (manager)
 │   ├── snapshot/  (side_git)
 │   ├── hitl/      (gate)

@@ -8,9 +8,8 @@
 > [ADR-0006](adr/0006-architecture-v0-resync-after-revert.md)（v0.2.5 重做） /
 > [ADR-0007](adr/0007-architecture-v0-tool-count-read-file-original-size.md)（v0.3 工具面 + read_file.original_size sync） /
 > [ADR-0008](adr/0008-architecture-v0-util-heartbeat-and-memory-5-8-lru.md)（v0.2.7 重做：util/heartbeat.py + memory schema 5.8 LRU；前次 commit b78638d1 被 revert） /
-> [ADR-0009](adr/0009-architecture-v0-util-http-parents-and-registry-settings-coupling.md)（v0.2.8：util/http_parents.py 抽取 + build_default_registry 配置来源从传参改为读 Settings）。/
-> [ADR-0010](adr/0010-architecture-v0-autonomous-iter-tasks-and-hitl-gate-pure-functions.md)（v0.2.9：autonomous.iter_tasks 生成器 + hitl/gate._parse_stdin_line 纯函数化）。/
-> [ADR-0011](adr/0011-architecture-v0-registry-class-internals-and-manager-bak-footnote.md)（v0.2.10：tools/registry.py 内部结构 doc 展开 + memory/manager.py.bak 备份留痕 + src/xragent/__tools_probe__.txt 探针残留留痕；新增 D6-5 自检）。
+> [ADR-0009](adr/0009-architecture-v0-util-http-parents-and-registry-settings-coupling.md)（v0.2.8：util/http_parents.py 抽取 + build_default_registry 配置来源从传参改为读 Settings）。
+> [ADR-0010](adr/0010-architecture-v0-autonomous-iter-tasks-and-hitl-gate-pure-functions.md)（v0.2.9：autonomous.iter_tasks 生成器 + hitl/gate._parse_stdin_line 纯函数化）。
 
 ## 一、五大核心
 
@@ -55,8 +54,6 @@
 
 ```
 src/xragent/
-├── __tools_probe__.txt        # 45 bytes 探针残留（疑似 min_diff_bytes gate 测试产物，commit 91ea0843 同期），
-│                             # git tracked；当前不被 import，清理决策留给后续轮次（见 ADR-0011 D3）
 ├── main.py                    # CLI 入口（--smoke / --once / --serve / --as-supervised
 │                             #           / --autonomous / --freeze，见 ADR-0006 D6）
 ├── config/settings.py         # pydantic-settings（v0.2.3 + snapshot_retention_days，见 ADR-0003 D3；
@@ -69,8 +66,6 @@ src/xragent/
 ├── core/react_loop.py         # ReAct 主循环（含 compress_if_needed 调用）
 ├── memory/manager.py          # MemoryManager：SQLite 长期事实 + compress_if_needed 封装
 │                             # 当前 schema 5.8（v0.2.7），见 ADR-0004 + ADR-0008
-│                             # 同目录 manager.py.bak：schema 5.5 之前快照（round 147，commit 43f68ada），
-│                             # git tracked；当前不被 import，清理决策留给后续轮次（见 ADR-0011 D2）
 ├── compression/simple.py      # 最简压缩（SimpleCompression.compress）
 ├── compression/hook.py        # 压缩策略注册表（已注册 simple）
 ├── snapshot/side_git.py       # 每个 turn snapshot
@@ -90,16 +85,6 @@ src/xragent/
 │                             # （v0.2.3 后 +1：memory_recall，见 ADR-0004；
 │                             #  v0.3 后 +1：memory_recall_by_tag，见 ADR-0007）
 │                             # evolution_enabled=false 时剩 15 个（去 propose_self_replace + terminate）
-│                             # 内部（v0.2.10，见 ADR-0011）：
-│                             #   - ToolDef dataclass（name/description/input_schema/risk/handler）
-│                             #   - ToolRegistry class：register / unregister / get / names / specs / run
-│                             #     run 流程：HITL gate → _apply_hitl → rejected 走 blocked envelope
-│                             #               → 否则 _safe_call(handler, args) 包异常 → approved 加 hitl_approved: True
-│                             #   - _apply_hitl：决策 args/approved/rejected（高风险走 HITL，return ApprovalRequest）
-│                             #   - _safe_call：handler 异常统一包 {"ok": False, "error": "<TypeName>: <msg>"} envelope；
-│                             #     BaseException（KeyboardInterrupt / SystemExit）不吞，让 supervisor 接管
-│                             #   - _call_gate：兼容 callable gate 与 .request() 对象两种 HITL gate 形态
-│                             #   - _HitlRejected sentinel + _HitlOutcome NamedTuple
 ├── tools/blacklist.py         # 路径围栏 + 黑名单校验（含 runtime_state.json 路径）
 ├── tools/memory_tools.py      # 5 个 memory_* 工具（save + 4 种 recall，见 ADR-0004 / ADR-0007）
 ├── tools/fs_tools.py          # read_file / list_dir / write_file
@@ -181,5 +166,4 @@ src/xragent/
 | v0.2.7 | 架构 doc 同步：util/heartbeat.py 抽取（5 → 6 模块）+ memory schema 5.8 LRU（`last_accessed_ts` / `touch_fact` / `recall_lru`）。util/heartbeat.py 落地 commit `1a3d1d42`；doc 同步 commit `b78638d1` 被 `348d6f33` revert，round 158 close-out commit `381c5b8b` 被 `ed2bcb3b` revert；本 ADR-0008 重做 | ADR-0008 |
 | v0.2.8 | 架构 doc 同步：util/http_parents.py 抽取（6 → 7 模块）+ tools/registry.build_default_registry 不再接 evolution_enabled 参数（自动读 Settings.evolution_enabled）。util/http_parents.py 落地 commit `7bd65f9a`；本 ADR-0009 doc sync | ADR-0009 |
 | v0.2.9 | 架构 doc 同步：autonomous.py 加 `iter_tasks(stop_check)` 生成器（公开 API）+ 3 helper 公开化（task_queue_path / task_cooldown_key / _recent_titles）；hitl/gate.py 加 `_parse_stdin_line(line)` 纯函数 + `_DEFAULT_POLICIES: dict[str, Decision]` 收敛 2 个硬编码 if 分支。autonomous.py 落地 commit `7bd65f9a`；hitl/gate.py 落地 commit `ecc0d468`；本 ADR-0010 doc sync | ADR-0010 |
-| v0.2.10 | 架构 doc 同步：tools/registry.py 内部结构 doc 展开（ToolDef dataclass + ToolRegistry class 六方法 + 5 module-level HITL/异常 helper：`_HitlRejected` sentinel / `_HitlOutcome` NamedTuple / `_call_gate` / `_apply_hitl` / `_safe_call`，完整流程"HITL gate → `_apply_hitl` 决策 → rejected 走 `blocked_by: "hitl"` envelope → 否则 `_safe_call` 包异常 → approved 加 `hitl_approved: True`"，`_safe_call` 契约：handler 抛 `Exception` 统一包 `{"ok": False, "error": "<TypeName>: <msg>"}` envelope，`BaseException` 不吞让 supervisor 接管）；memory/manager.py.bak 备份留痕（schema 5.5 之前快照，round 147 commit `43f68ada`，git tracked，当前不被 import）；src/xragent/__tools_probe__.txt 探针残留留痕（45 bytes，疑似 min_diff_bytes gate 测试产物 commit `91ea0843` 同期，git tracked，当前不被 import）；新增 D6-5 自检"仓库残留文件清单"。本 ADR-0011 doc sync | ADR-0011 |
 | v0.3 (planned) | 长期记忆强化（recall 工具全量上线 ✅；待办：摘要压缩 hook 强化） | 待定 |
