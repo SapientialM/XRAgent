@@ -60,6 +60,37 @@ def _apply_hitl(name: str, td: ToolDef, args: dict[str, Any], gate: Any) -> _Hit
     return _HitlOutcome(args=args, approved=True, rejected=None)
 
 
+def _safe_call(
+    handler: Callable[..., dict[str, Any]], args: dict[str, Any]
+) -> dict[str, Any]:
+    """调用 ``handler(**args)`` 并把任意异常包成 ``{"ok": False, "error": ...}`` envelope。
+
+    抽出来原因: :meth:`ToolRegistry.run` 里原本内嵌 ``try/except`` 块,
+    handler 一多就重复; 而且 HITL 之外的执行路径 (e.g. 未来直接 ``dispatch``
+    给 LLM 调用 handler) 也想复用同一份异常契约, 集中到一处。
+
+    行为约定:
+      * handler 正常返回 → 透传 (不强制 ``ok`` 键, 因为 handler 自签契约);
+      * handler 抛 ``Exception`` → ``{"ok": False, "error": "<TypeName>: <msg>"}``
+        —— 与旧 ``ToolRegistry.run`` 内部 try/except 完全等价, 保证
+        test_registry 中 ``test_run_handler_exception_is_swallowed_with_error_envelope``
+        等历史断言不破;
+      * ``BaseException`` (KeyboardInterrupt / SystemExit) 不吞, 让 supervisor
+        接管——避免误吞中断信号导致 Agent 失控。
+
+    Args:
+        handler: 已注册的 tool handler, 签名 ``(**args) -> dict[str, Any]``。
+        args: 透传给 handler 的 kwargs; 空 dict 时等价于 ``handler()``。
+
+    Returns:
+        dict[str, Any]: handler 原返回值, 或异常 envelope。
+    """
+    try:
+        return handler(**args)
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
 class ToolRegistry:
     """工具注册中心 —— ``ToolDef`` 的 dict 容器 + HITL gate 调度。
 
@@ -133,7 +164,7 @@ class ToolRegistry:
           1. :meth:`get` 取 :class:`ToolDef`（未知工具抛 KeyError）；
           2. :func:`_apply_hitl` 决定 ``args`` / ``approved`` / ``rejected``；
           3. 若 ``rejected`` 非 None，直接返回 ``{"ok": False, "blocked_by": "hitl", "reason": ...}``；
-          4. 否则 ``td.handler(**args)``；任何异常包成 ``{"ok": False, "error": ...}``；
+          4. 否则 :func:`_safe_call` 调 handler 并包异常 envelope；
           5. 若 ``approved``，在结果 dict 上加 ``hitl_approved: True``。
 
         Args:
@@ -148,10 +179,8 @@ class ToolRegistry:
         outcome = _apply_hitl(name, td, args, gate)
         if outcome.rejected is not None:
             return {"ok": False, "blocked_by": "hitl", "reason": outcome.rejected.reason}
-        try:
-            out = td.handler(**outcome.args)
-        except Exception as e:
-            out = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        # _safe_call 已吞 Exception (除 BaseException), 不再需要外层 try/except
+        out = _safe_call(td.handler, outcome.args)
         if outcome.approved:
             out = {"ok": out.get("ok", True), **out, "hitl_approved": True}
         return out
@@ -191,17 +220,17 @@ def build_default_registry() -> ToolRegistry:
         """
         r.register(ToolDef(name=name, description=desc, input_schema=schema, risk=risk, handler=fn))
 
-    add("read_file", "读取仓库内文本文件，可选 max_bytes 截断（仅返回首 N 字节；超出时 truncated=True）。返回字段含 original_size（文件原始字节数，恒报）与 size（返回字符数）。",
+    add("read_file", "读取仓库内文本文件，可选 max_bytes 截断（仅返回首 N 字节；超出时 truncated=True）。返回字段含 original_size（文件原始字节数，恒报）与 size（返回字符数）。硬上限 MAX_READ_BYTES (默认 200KB): 超过时直接 ok=False 拒绝, 带 size/limit 字段; max_bytes 显式时优先, 不走硬上限。",
         {"type": "object", "properties": {
             "path": {"type": "string"},
             "max_bytes": {"type": "integer", "minimum": 1,
-                          "description": "可选字节上限；None / 0 / 负数 / 非 int → 不截断（向后兼容）。"},
+                          "description": "可选字节上限；None / 0 / 负数 / 非 int → 不截断（向后兼容）。显式时优先于 MAX_READ_BYTES。"},
         }, "required": ["path"]},
         "low", fs_tools.read_file)
     add("list_dir", "列出仓库内目录内容（不含 .git）。",
         {"type": "object", "properties": {"path": {"type": "string", "default": "."}}},
         "low", fs_tools.list_dir)
-    add("write_file", "在仓库内创建/覆盖文件；目标必须经过路径围栏与黑名单校验。需要 HITL 审批。",
+    add("write_file", "在仓库内创建/覆盖文件；目标必须经过路径围栏与黑名单校验。content 必须是 str, 超 MAX_WRITE_BYTES (默认 1MB) 拒绝。需要 HITL 审批。",
         {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]},
         "high", fs_tools.write_file)
     add("run_cmd", "在仓库根执行 shell 命令；30s 超时；走 binary 黑名单。需要 HITL 审批。",

@@ -9,6 +9,18 @@ from ..config.settings import get_settings
 from .blacklist import BlacklistedTarget, PathSandbox
 
 
+# -------------------- 默认上限常量 --------------------
+# 模块级常量, 方便测试用 monkeypatch 调小来构造边界用例, 避免动辄 200KB+
+# 字符串拖慢 pytest。sanity 范围 (test_tools_refactor 锁):
+#   - 10_000  <= MAX_READ_BYTES <= 10_000_000   (10KB ~ 10MB)
+#   - MAX_WRITE_BYTES >= MAX_READ_BYTES
+#   - 10_000  <= MAX_WRITE_BYTES <= 100_000_000  (10KB ~ 100MB)
+# 读比写更小: read 进 LLM context, write 只到磁盘; 给 write 更宽的预算
+# 让 "Agent 一次写大块 README / schema" 类用例不至于被误拒。
+MAX_READ_BYTES: int = 200_000     # 200KB
+MAX_WRITE_BYTES: int = 1_000_000  # 1MB
+
+
 # -------------------- 公共 helper --------------------
 
 def _fail(error: str) -> dict[str, Any]:
@@ -62,35 +74,57 @@ def _read_text_capped(path: Path, *, max_bytes: int | None) -> tuple[str, bool]:
 
 # -------------------- 路径围栏 helpers --------------------
 
-def _resolve_inside(path: str) -> tuple[Path | None, str | None]:
-    """read_file / list_dir 共用的越界校验封装。
+def _sandbox_resolve(
+    path: str, *, writable: bool = False
+) -> tuple[Path | None, dict[str, Any] | None]:
+    """read_file / list_dir / write_file 共用的围栏 + 黑名单解析。
+
+    与旧版 ``_resolve_inside`` / ``_resolve_writable`` 的差别:
+      * 返回 ``(None, dict)`` 而非 ``(None, str)``: 直接给调用方一个
+        ``ok=False`` 字典, 省一次 ``_fail(err_str)`` 包装, 减少类型漂移。
+      * ``writable=False`` 走 ``assert_inside`` (只查围栏, 不查黑名单),
+        与旧 ``read_file`` 行为一致 (test_fs_tools 锁).
+      * ``writable=True`` 走 ``assert_writable`` (围栏 + 黑名单双层),
+        ``AGENTS.md`` / ``.env`` 等受保护路径会被拒.
 
     调用方收到 ``(target, None)`` 继续走流程;
-    收到 ``(None, error_str)`` 直接 ``_fail(error_str)`` 返回。
-
-    抽出来之后:
-      * 围栏策略改动只需动 PathSandbox 一个地方
-      * 错误文案逐字保留 (test_fs_tools.py 的 ``"目标越界"`` 断言锁的就是该文案)
+    收到 ``(None, err_dict)`` 直接 ``return err_dict``。
     """
     try:
-        target = PathSandbox.from_settings().assert_inside(path)
+        if writable:
+            target = PathSandbox.from_settings().assert_writable(path)
+        else:
+            target = PathSandbox.from_settings().assert_inside(path)
         return target, None
     except BlacklistedTarget as e:
-        return None, str(e)
+        return None, {"ok": False, "error": str(e)}
+
+
+def _resolve_inside(path: str) -> tuple[Path | None, str | None]:
+    """read_file / list_dir 共用的越界校验封装 (legacy 字符串返回形态)。
+
+    新代码优先用 :func:`_sandbox_resolve`; 本函数保留是因为部分老
+    调用方期望 ``(target, error_str)`` 二元组 (而非 dict), 拆掉会
+    一次性破坏面太大。实现上转调 ``_sandbox_resolve`` 然后把
+    ``err_dict["error"]`` 拆回 str —— 单行开销, 没有重复逻辑。
+    """
+    target, err_dict = _sandbox_resolve(path, writable=False)
+    if err_dict is not None:
+        return None, err_dict["error"]
+    return target, None
 
 
 def _resolve_writable(path: str) -> tuple[Path | None, str | None]:
-    """write_file 专用: 走 ``assert_writable`` (围栏 + 黑名单双层校验)。
+    """write_file 专用: legacy 字符串返回形态, 内部转调 ``_sandbox_resolve``。
 
     与 :func:`_resolve_inside` 形态对齐, 写入路径的拒因有 "越界" 和
     "黑名单命中" 两类, 错误文案由 PathSandbox / ``is_protected`` 决定,
     此处只透传。
     """
-    try:
-        target = PathSandbox.from_settings().assert_writable(path)
-        return target, None
-    except BlacklistedTarget as e:
-        return None, str(e)
+    target, err_dict = _sandbox_resolve(path, writable=True)
+    if err_dict is not None:
+        return None, err_dict["error"]
+    return target, None
 
 
 # -------------------- public tools --------------------
@@ -102,11 +136,17 @@ def read_file(path: str, max_bytes: int | None = None) -> dict[str, Any]:
     读取当前对 AGENTS.md/.env 等的现有契约——见 test_fs_tools 中
     ``test_read_file_currently_does_not_block_agents_md`` 锁定的快照)。
 
-    ``max_bytes`` 是 v0.2 新增的可选字节上限: 防止单次返回巨大文件把
-    LLM context window 打爆。语义与 ``_read_text_capped`` 对齐——
-    传 None / 非正数 / 非 int 都退回 "读全文" 的旧行为 (向后兼容);
-    真正超出时返回的 ``truncated`` 字段会标 True, 让 LLM 知道有字节
-    被截掉、可能要换 ``list_dir`` / ``memory_recall`` 等更轻的工具。
+    双层字节上限语义:
+      * ``MAX_READ_BYTES`` (模块常量, 默认 200KB) —— 硬上限, 超过直接
+        ``ok=False`` 拒绝, 防 Agent 误读超大文件撑爆内存 / 拖慢推理。
+        失败时带 ``size`` / ``limit`` 字段, LLM 可据此决定是否改用
+        ``exec_tools`` (head/tail) 或 ``list_dir``。
+      * ``max_bytes`` (参数, 软上限) —— LLM 主动指定的截断点; 超过只
+        截断不拒 (走 ``_read_text_capped``), ``truncated=True`` 标记。
+        ``max_bytes`` 显式时 **优先于** ``MAX_READ_BYTES``: LLM 既然
+        知道自己在读大文件 (e.g. max_bytes=1_000_000), 就不该再被
+        200KB 默认值拦下。
+      * ``max_bytes=None`` (默认) → 走 ``MAX_READ_BYTES`` 硬上限。
 
     v0.3 新增 ``original_size`` 字段: 始终报告文件在磁盘上的原始字节
     数 (``stat().st_size``), 即便 ``truncated=False`` 也带上。
@@ -116,10 +156,11 @@ def read_file(path: str, max_bytes: int | None = None) -> dict[str, Any]:
     数字在非 ASCII 内容下会不一致——这是有意的 (size 对应 LLM 看到的
     文本长度, original_size 对应 max_bytes 操作的字节预算)。
 
-    失败路径统一返回 ``_fail(error)``:
+    失败路径统一返回 ``_fail(error)`` 或带 size/limit 字段的 dict:
       * 越界 → 由 PathSandbox 给文案
       * 不存在 / 是目录 / 非 utf-8 / **OSError** (PermissionError 等)
         → ``"读取失败: <type>: <msg>"``
+      * 超 ``MAX_READ_BYTES`` → ``{"ok": False, "error": "文件过大", "size": N, "limit": M}``
 
     Returns:
         ``dict[str, Any]``, LLM 工具契约字段:
@@ -129,7 +170,8 @@ def read_file(path: str, max_bytes: int | None = None) -> dict[str, Any]:
               ``size`` 是返回内容字符数; ``original_size`` 是文件原始
               字节数; ``truncated`` 仅当 max_bytes 真生效且文件更长
               时为 True
-            * 失败时附加 ``error`` (str): 含字段名 + 实际类型 / 错误类名
+            * 失败时附加 ``error`` (str): 含字段名 + 实际类型 / 错误类名;
+              "文件过大" 分支还附 ``size`` / ``limit`` 两个 int。
     """
     target, err = _resolve_inside(path)
     if err is not None:
@@ -139,6 +181,16 @@ def read_file(path: str, max_bytes: int | None = None) -> dict[str, Any]:
         return _fail(f"目标不存在: {path}")
     if target.is_dir():
         return _fail(f"目标是目录，不能 read: {path}")
+    # 硬上限 (max_bytes=None 才生效); max_bytes 显式时让 LLM 自决
+    if max_bytes is None:
+        size_on_disk = target.stat().st_size
+        if size_on_disk > MAX_READ_BYTES:
+            return {
+                "ok": False,
+                "error": "文件过大",
+                "size": size_on_disk,
+                "limit": MAX_READ_BYTES,
+            }
     try:
         content, truncated = _read_text_capped(target, max_bytes=max_bytes)
     except UnicodeDecodeError:
@@ -218,20 +270,46 @@ def list_dir(path: str = ".") -> dict[str, Any]:
 def write_file(path: str, content: str) -> dict[str, Any]:
     """创建或覆盖仓库内文件。HITL 审批在 registry 层 (``risk=high``)。
 
-    ``mkdir`` 与 ``write_text`` 各包一层 ``OSError`` 兜底, 失败文案前缀
-    ``"写入失败"`` 与 :func:`read_file` 的 ``"读取失败"`` 对齐, 便于
-    LLM 看到日志直接定位 (test_fs_tools_oserror.py 锁定)。
+    三层防护:
+      1. **类型校验** —— ``content`` 必须是 ``str``; 非字符串 (e.g. ``int`` /
+         ``None`` / ``dict``) 直接 ``ok=False`` 拒绝, 文案带 ``type(content).__name__``
+         让 LLM 看到立刻知道传错类型。旧版会传给 ``Path.write_text`` 然后
+         抛 ``AttributeError``, 经黑名单转 ``ok=False`` 但文案对 LLM 不友好。
+      2. **大小上限** —— ``len(content) > MAX_WRITE_BYTES`` 直接拒,
+         带 ``size`` / ``limit`` 字段, 防止 Agent 一次写出超大文件 (OOM /
+         写满磁盘 / 拖慢 git push)。
+      3. **OSError 兜底** —— ``mkdir`` 与 ``write_text`` 各包一层
+         ``OSError``, 失败文案前缀 ``"写入失败"`` 与 :func:`read_file` 的
+         ``"读取失败"`` 对齐, 便于 LLM 看到日志直接定位
+         (test_fs_tools_oserror.py 锁定)。
 
     Returns:
         ``dict[str, Any]``, LLM 工具契约字段:
             * ``ok`` (bool): True 表示写入成功
             * 成功时附加 ``path`` / ``size`` (str / int)
-            * 失败时附加 ``error`` (str): 含 ``"写入失败: <type>: <msg>"``
+            * 失败时附加 ``error`` (str); 类型错 / 过大分支还附
+              ``type`` / ``size`` / ``limit`` 等诊断字段
     """
     target, err = _resolve_writable(path)
     if err is not None:
         return _fail(err)
     assert target is not None
+    # 类型校验先于一切: 避免把 int/None 传给 write_text 抛 AttributeError
+    if not isinstance(content, str):
+        return {
+            "ok": False,
+            "error": f"content 必须是字符串, got {type(content).__name__}",
+            "type": type(content).__name__,
+        }
+    # 大小上限 (按字符数, 与 len(content) 一致; utf-8 多字节下字节数更大,
+    # 但 LLM 看的是字符, 用 len 对齐更直观)。
+    if len(content) > MAX_WRITE_BYTES:
+        return {
+            "ok": False,
+            "error": "写入内容过大",
+            "size": len(content),
+            "limit": MAX_WRITE_BYTES,
+        }
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
