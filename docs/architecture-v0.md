@@ -9,6 +9,7 @@
 > [ADR-0007](adr/0007-architecture-v0-tool-count-read-file-original-size.md)（v0.3 工具面 + read_file.original_size sync） /
 > [ADR-0008](adr/0008-architecture-v0-util-heartbeat-and-memory-5-8-lru.md)（v0.2.7 重做：util/heartbeat.py + memory schema 5.8 LRU；前次 commit b78638d1 被 revert） /
 > [ADR-0009](adr/0009-architecture-v0-util-http-parents-and-registry-settings-coupling.md)（v0.2.8：util/http_parents.py 抽取 + build_default_registry 配置来源从传参改为读 Settings）。
+> [ADR-0010](adr/0010-architecture-v0-autonomous-iter-tasks-and-hitl-gate-pure-functions.md)（v0.2.9：autonomous.iter_tasks 生成器 + hitl/gate._parse_stdin_line 纯函数化）。
 
 ## 一、五大核心
 
@@ -25,6 +26,15 @@
 - **自驱动（autonomous）** 不是 AGI，是"按 task templates + ReAct + commit"在没人在时也稳定推进的循环；
   模板见 `src/xragent/autonomous.py::TASK_TEMPLATES`（共 8 个），默认冷却 2h（`DEFAULT_COOLDOWN_S=7200`），
   `memory/queue.jsonl` 留痕（不入 git）。
+  公开 API：`next_task(rng)` 选一个不在 cooldown 里的任务；`record_done(task, turn_id, summary)` append-only 留痕；
+  **`iter_tasks(stop_check)`** 是生成器（v0.2.9，见 ADR-0010），每次 `next()` 拉一次 `next_task()`，直到 `stop_check()` 返回
+  True 才停 —— 落地测试用，main.py 主循环当前仍走 imperative `next_task` 路径（待后续切换）；
+  3 个 module-level helper：`task_queue_path()` / `task_cooldown_key(task)` / `_recent_titles(window_s)` 全部带
+  Google-style docstring 与 PEP 604 类型注解（v0.2.9 公开化）。
+- **父母（HITL 门）** 内部结构（v0.2.9，见 ADR-0010）：stdin 解析抽到模块级纯函数 `_parse_stdin_line(line)`，
+  只依赖模块常量 `_APPROVE_INPUTS` / `_REJECT_INPUTS` / `_EDIT_PREFIX`，不读 stdin、不写 stderr；
+  决策策略用 `_DEFAULT_POLICIES: dict[str, Decision]` 收敛 2 个硬编码 if 分支。
+  目的：让 stdin 解析 + 决策分支**可单测**，无需 mock stdin 或 fork 子进程。
 - **Watchdog / Supervisor**（见 ADR-0005 / ADR-0006）：与 autonomous 是两条线——
   autonomous 主动按 TASK_TEMPLATES 推进任务，watchdog 被动守护子进程存活（heartbeat 超时则 SIGTERM + fork）。
   守护窗口由 `settings.heartbeat_timeout_s` 控制（当前 60s），并非"24h"那种长周期。
@@ -66,7 +76,10 @@ src/xragent/
 ├── evolve/metamorphosis.py    # 金蝉脱壳：编译新 main.py 并切换 entry
 ├── evolve/generations.py      # generations.jsonl 留痕
 ├── autonomous.py              # 定时巡检 + TASK_TEMPLATES（8 个）+ queue.jsonl
+│                             # 公开 API：next_task / record_done / iter_tasks（v0.2.9 生成器，见 ADR-0010）
+│                             #          + task_queue_path / task_cooldown_key / _recent_titles（v0.2.9 公开化）
 ├── hitl/gate.py               # HITL 门（高危动作 / 高危工具审批）
+│                             # 内部：_parse_stdin_line 纯函数 + _DEFAULT_POLICIES dict（v0.2.9，见 ADR-0010）
 ├── http_server.py             # HTTP 父通道（补全 HIL 通道，见 ADR-0001 D2）
 ├── tools/registry.py          # build_default_registry()：注册 17 个工具
 │                             # （v0.2.3 后 +1：memory_recall，见 ADR-0004；
@@ -152,4 +165,5 @@ src/xragent/
 | v0.2.6 | 架构 doc 同步：工具面 15 → 17（+snapshot_cleanup +memory_recall_by_tag）+ read_file.original_size + memory_tools 注释 4→5 | ADR-0007 |
 | v0.2.7 | 架构 doc 同步：util/heartbeat.py 抽取（5 → 6 模块）+ memory schema 5.8 LRU（`last_accessed_ts` / `touch_fact` / `recall_lru`）。util/heartbeat.py 落地 commit `1a3d1d42`；doc 同步 commit `b78638d1` 被 `348d6f33` revert，round 158 close-out commit `381c5b8b` 被 `ed2bcb3b` revert；本 ADR-0008 重做 | ADR-0008 |
 | v0.2.8 | 架构 doc 同步：util/http_parents.py 抽取（6 → 7 模块）+ tools/registry.build_default_registry 不再接 evolution_enabled 参数（自动读 Settings.evolution_enabled）。util/http_parents.py 落地 commit `7bd65f9a`；本 ADR-0009 doc sync | ADR-0009 |
+| v0.2.9 | 架构 doc 同步：autonomous.py 加 `iter_tasks(stop_check)` 生成器（公开 API）+ 3 helper 公开化（task_queue_path / task_cooldown_key / _recent_titles）；hitl/gate.py 加 `_parse_stdin_line(line)` 纯函数 + `_DEFAULT_POLICIES: dict[str, Decision]` 收敛 2 个硬编码 if 分支。autonomous.py 落地 commit `7bd65f9a`；hitl/gate.py 落地 commit `ecc0d468`；本 ADR-0010 doc sync | ADR-0010 |
 | v0.3 (planned) | 长期记忆强化（recall 工具全量上线 ✅；待办：摘要压缩 hook 强化） | 待定 |
