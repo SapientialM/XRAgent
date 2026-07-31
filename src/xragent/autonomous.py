@@ -5,7 +5,6 @@
 """
 from __future__ import annotations
 
-import os
 import random
 import time
 from pathlib import Path
@@ -151,25 +150,29 @@ def _recent_titles(window_s: float = DEFAULT_COOLDOWN_S) -> set[str]:
     return seen
 
 
-
-# === autonomous turn-11 patch ===
-# 把任务模板按"风险/收益"排序(优先小改动);冷却从 1h 改 2h。
-def next_task(rng: random.Random | None = None) -> dict[str, Any]:
+def next_task(
+    rng: random.Random | None = None,
+    window_s: float = DEFAULT_COOLDOWN_S,
+) -> dict[str, Any]:
     """从 templates 选一个不在 cooldown 里的任务。
 
-    cooldown：同 title 1 小时内不重复。
-    全冷却时返回第一个（让 Agent 自己想办法或蜕皮）。
+    cooldown：同 title ``window_s`` 秒内不重复；``window_s`` 可调，便于
+    测试时短时间绕过冷却。全冷却时返回 ``TASK_TEMPLATES[0]``，让
+    Agent 自己想办法或蜕皮。
 
     Args:
         rng: 可选随机源；``None`` 时用模块级 :mod:`random`。传入 ``Random``
             实例便于测试时固定种子。
+        window_s: cooldown 时间窗口（秒）；默认 ``DEFAULT_COOLDOWN_S``（2h）。
 
     Returns:
         选中的任务 dict（来自 :data:`TASK_TEMPLATES`）。
     """
     rng = rng or random
-    recent = _recent_titles()
-    candidates = [t for t in TASK_TEMPLATES if task_cooldown_key(t) not in recent]
+    candidates = [
+        t for t in TASK_TEMPLATES
+        if task_cooldown_key(t) not in _recent_titles(window_s)
+    ]
     if not candidates:
         # 硬退化：所有模板都还在 cooldown，返回 [0] 让 Agent 自己想办法。
         # 用索引而非 title 字面量，避免模板表顺序漂移时悄悄换 fallback。
@@ -209,7 +212,8 @@ def iter_tasks(stop_check: Callable[[], bool]) -> Iterator[dict[str, Any]]:
     Yields:
         dict: 选中的任务模板。
     """
+    # random.Random() 构造器已经默认用 os.urandom seed；再调一次 rng.seed()
+    # 只会再触发一次 entropy pull，纯冗余（同时让测试看不出"是不是真 seed 过"）。
     rng = random.Random()
-    rng.seed()
     while not stop_check():
         yield next_task(rng)
