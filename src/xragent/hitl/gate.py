@@ -49,6 +49,19 @@ class Decision(enum.Enum):
     EDIT = "edit_and_approve"
 
 
+# === 默认策略表 ===
+#
+# ``request()`` 默认策略只有两条: ``approve-all`` 与 ``reject-all``;
+# 其它取值（含 ``"ask"`` / ``"interactive"`` 等）走 channel。把两条策略
+# 收成 dict lookup 后,新增一种"批量放行"模式只需往表里加一行,不用再加 if。
+# key 是 ``settings.hitl_default`` 的字符串,value 是对应的 Decision。
+# reason 在 :meth:`HitlGate.request` 里沿用 key 本身以便审计日志一眼可读。
+_DEFAULT_POLICIES: dict[str, Decision] = {
+    "approve-all": Decision.APPROVE,
+    "reject-all": Decision.REJECT,
+}
+
+
 @dataclass
 class ApprovalRequest:
     """一个待审批的高危动作。
@@ -107,6 +120,37 @@ class ApprovalResult:
 Channel = Callable[[ApprovalRequest], ApprovalResult]
 
 
+def _parse_stdin_line(line: str) -> ApprovalResult:
+    """把 stdin 一行用户输入解析成 :class:`ApprovalResult`。
+
+    Pure function：只依赖模块常量（``_APPROVE_INPUTS`` / ``_REJECT_INPUTS`` /
+    ``_EDIT_PREFIX``），不读 stdin、不写 stderr，方便单测直接覆盖。
+
+    Args:
+        line: 用户原始输入（``input()`` 整行，可能带前后空白与大小写）。
+
+    Returns:
+        解析后的 ``ApprovalResult``。约定见模块顶注释：
+          * 命中 ``_APPROVE_INPUTS``（含空行 = 接受默认）→ APPROVE；
+          * 命中 ``_REJECT_INPUTS`` → REJECT（reason 留空）；
+          * 命中 ``_EDIT_PREFIX`` 且 JSON 合法 → EDIT，``edited_args``
+            是解析后的对象；JSON 不合法 → REJECT，reason 含原始错误；
+          * 其它输入 → REJECT，reason="未识别输入"。
+    """
+    line = line.strip()
+    if line in _APPROVE_INPUTS:
+        return ApprovalResult(Decision.APPROVE)
+    if line in _REJECT_INPUTS:
+        return ApprovalResult(Decision.REJECT)
+    if line.startswith(_EDIT_PREFIX):
+        try:
+            edited = json.loads(line[len(_EDIT_PREFIX):].strip())
+            return ApprovalResult(Decision.EDIT, edited_args=edited)
+        except json.JSONDecodeError as e:
+            return ApprovalResult(Decision.REJECT, reason=f"edit 解析失败: {e}")
+    return ApprovalResult(Decision.REJECT, reason="未识别输入")
+
+
 class HitlGate:
     """HITL 决策中枢：默认策略 + 可注入的人工 channel。
 
@@ -138,6 +182,10 @@ class HitlGate:
     def request(self, req: ApprovalRequest) -> ApprovalResult:
         """对一条审批请求做决策：默认策略优先，剩下走 channel。
 
+        默认策略查 :data:`_DEFAULT_POLICIES`：命中即返回 ``ApprovalResult``，
+        ``reason`` 沿用 key 字符串；未命中（``"ask"`` / ``"interactive"`` 等
+        需要人工介入的值）走 ``self._channel``。
+
         Args:
             req: 待审批动作。
 
@@ -145,26 +193,20 @@ class HitlGate:
             :class:`ApprovalResult`。``approve-all`` / ``reject-all`` 时
             不调 channel；其它情况透传 channel 的返回值。
         """
-        if self.default == "approve-all":
-            return ApprovalResult(Decision.APPROVE, reason="approve-all")
-        if self.default == "reject-all":
-            return ApprovalResult(Decision.REJECT, reason="reject-all")
+        policy = _DEFAULT_POLICIES.get(self.default)
+        if policy is not None:
+            return ApprovalResult(policy, reason=self.default)
         return self._channel(req)
 
     def _stdin_channel(self, req: ApprovalRequest) -> ApprovalResult:
         """内置 channel：往 stderr 写 prompt，从 stdin 读一行解析。
 
-        解析规则（见模块顶 ``_APPROVE_INPUTS`` / ``_REJECT_INPUTS`` /
-        ``_EDIT_PREFIX``）:
-          * 命中 ``_APPROVE_INPUTS``（``y`` / ``Y`` / ``yes`` / ``ok`` / 空行）
-            → APPROVE（空行视作"接受默认"，上游 prompt 一般带 ``[Y/n]``）。
-          * 命中 ``_REJECT_INPUTS``（``n`` / ``N`` / ``no``）→ REJECT（reason 留空）。
-          * 命中 ``_EDIT_PREFIX``（``e:<json>``）→ EDIT，``edited_args`` 是
-            解析后的对象；JSON 解析失败 → REJECT，reason 携带错误细节。
-          * 其它输入 → REJECT，reason="未识别输入"。
-
-        ``EOFError``（stdin 被关了，例如 CI 里没 tty）→ REJECT，
-        reason="stdin EOF"——宁可保守拒绝也别擅自放行。
+        决策规则完全交给 :func:`_parse_stdin_line`（pure function，
+        便于单测覆盖所有分支）。本方法只负责：
+          1. 把 :meth:`ApprovalRequest.render` 写到 stderr 并 flush；
+          2. 捕获 ``EOFError``（stdin 被关了，例如 CI 里没 tty）→ REJECT，
+             reason="stdin EOF"——宁可保守拒绝也别擅自放行；
+          3. 把读到的一行原样交给解析器。
         """
         sys.stderr.write(req.render())
         sys.stderr.flush()
@@ -172,18 +214,7 @@ class HitlGate:
             line = input()
         except EOFError:
             return ApprovalResult(Decision.REJECT, reason="stdin EOF")
-        line = line.strip()
-        if line in _APPROVE_INPUTS:
-            return ApprovalResult(Decision.APPROVE)
-        if line in _REJECT_INPUTS:
-            return ApprovalResult(Decision.REJECT)
-        if line.startswith(_EDIT_PREFIX):
-            try:
-                edited = json.loads(line[len(_EDIT_PREFIX):].strip())
-                return ApprovalResult(Decision.EDIT, edited_args=edited)
-            except json.JSONDecodeError as e:
-                return ApprovalResult(Decision.REJECT, reason=f"edit 解析失败: {e}")
-        return ApprovalResult(Decision.REJECT, reason="未识别输入")
+        return _parse_stdin_line(line)
 
     def set_channel(self, channel: Channel) -> None:
         """运行期替换人工 channel（例如切到 webhook / silent mode）。
