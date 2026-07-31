@@ -13,11 +13,27 @@ from ..core.dream import is_protected
 
 
 class BlacklistedTarget(Exception):
-    pass
+    """路径围栏 / 写入黑名单双重拦截时抛出。
+
+    抛出场景（与 :class:`PathSandbox` 配套）:
+      * :meth:`PathSandbox.assert_inside` 越界 (``target not relative to root``)
+      * :meth:`PathSandbox.assert_writable` 越界 或命中 ``is_protected`` (例如
+        ``AGENTS.md`` / ``.env`` / ``runtime_state.json`` / ``.git/``)
+
+    异常文案刻意带原始 / 相对路径，方便 HITL 审批人直接展示。
+    """
 
 
 class BlacklistedCommand(Exception):
-    pass
+    """命令级拦截抛出（与 :func:`assert_command_allowed` 配套）。
+
+    抛出场景:
+      * ``Settings.cmd_blacklist`` 命中（exact / glob / re 三种前缀形态）
+      * 内置危险模式命中（``_DANGEROUS_PATTERNS``，不可关闭）
+      * ``Settings.cmd_blacklist_patterns`` 用户自定义 regex 命中
+      * ``cmd_blacklist`` / ``cmd_blacklist_patterns`` 配置非法 → 抛出而非
+        静默忽略（"默认安全"：错误拦截规则宁可让审批人看到，也别变成漏洞）
+    """
 
 
 @dataclass(frozen=True)
@@ -59,12 +75,31 @@ class PathSandbox:
     def assert_inside(self, raw: str | Path) -> Path:
         """只检查路径围栏，不查黑名单。
 
-        用于读取场景（read_file / list_dir）——读取当前不查 is_protected，
-        写入（assert_writable）才查黑名单。把围栏判断单独提出来后，
-        fs_tools 不必各自再写一遍 try/except relative_to。
+        用途：读取场景（``read_file`` / ``list_dir``）——读取不查
+        ``is_protected``，写入（:meth:`assert_writable`）才查黑名单。
+        把围栏判断单独提出来后，``fs_tools`` 不必各自再写一遍
+        ``try/except relative_to``。
 
-        异常文案刻意不追加 "不在 {self.root} 之下"，与读取路径原本
-        返回的错误信息保持一致；后续若要统一，可在调用点自行拼接。
+        Args:
+            raw: 原始路径；接受 ``str`` 或任何 ``os.PathLike``（如 ``Path``）。
+                相对路径以 ``self.root`` 为基准；绝对路径必须落在 ``self.root`` 之下。
+
+        Returns:
+            Path: 规范化后的绝对路径（与 :meth:`resolve` 一致）。
+
+        Raises:
+            BlacklistedTarget: 当 ``raw`` 解析后不在 ``self.root`` 之下
+                （``target.relative_to(self.root)`` 抛 ``ValueError``）。
+                文案不追加"不在 {self.root} 之下"，与读取路径原本的
+                错误信息保持一致；调用方如需统一，可在调用点自行拼接。
+
+        Examples:
+            >>> sb = PathSandbox.from_settings()
+            >>> sb.assert_inside("src/xragent/main.py")  # 相对路径 → repo_root 下
+            >>> sb.assert_inside("/etc/passwd")          # doctest: +SKIP
+            Traceback (most recent call last):
+                ...
+            BlacklistedTarget: 目标越界: /etc/passwd
         """
         target = self.resolve(raw)
         try:
@@ -76,8 +111,37 @@ class PathSandbox:
     def assert_writable(self, raw: str | Path) -> Path:
         """写入前双层校验：先围栏，再黑名单。
 
-        黑名单检查依赖 is_protected（dream.py），命中时抛
-        BlacklistedTarget 并给出相对路径，方便上层直接展示。
+        流程：
+          1. 调 :meth:`assert_inside` 校验围栏；
+          2. 通过后调 ``is_protected(target)``（``dream.py`` 的 DREAM 章节
+             黑名单）查 ``AGENTS.md`` / ``.env`` / ``runtime_state.json`` /
+             ``.git/`` 等受保护目标；
+          3. 任一失败抛 :class:`BlacklistedTarget`，文案携带相对路径
+             便于上层直接展示。
+
+        Args:
+            raw: 原始路径；接受 ``str`` 或任何 ``os.PathLike``（如 ``Path``）。
+                相对路径以 ``self.root`` 为基准；绝对路径必须落在 ``self.root`` 之下。
+
+        Returns:
+            Path: 规范化后的绝对路径（与 :meth:`resolve` 一致）。
+
+        Raises:
+            BlacklistedTarget:
+                * 越界（与 :meth:`assert_inside` 文案一致："目标越界: …"）；
+                * 黑名单命中（"目标受保护: <相对路径>"）。
+
+        Examples:
+            >>> sb = PathSandbox.from_settings()
+            >>> sb.assert_writable("src/xragent/main.py")  # 通过
+            >>> sb.assert_writable("AGENTS.md")            # doctest: +SKIP
+            Traceback (most recent call last):
+                ...
+            BlacklistedTarget: 目标受保护: AGENTS.md
+            >>> sb.assert_writable("/etc/passwd")          # doctest: +SKIP
+            Traceback (most recent call last):
+                ...
+            BlacklistedTarget: 目标越界: /etc/passwd
         """
         target = self.assert_inside(raw)
         if is_protected(target):
