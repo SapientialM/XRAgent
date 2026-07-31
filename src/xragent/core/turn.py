@@ -9,6 +9,13 @@ from typing import Any
 
 from ..config.settings import get_settings
 
+# Turn ID 格式约定：``YYYYMMDD-HHMMSS-mmm``。
+# 抽成 module-level 常量便于 (a) 复用、(b) 改格式时单点修改、
+# (c) 测试可按名引用而不是按字面量字符串匹配。
+_TURN_ID_FMT_PREFIX = "%Y%m%d-%H%M%S"  # date(8) + '-' + time(6) 共 15 字符
+_TURN_ID_MS_DIGITS = 3                  # 毫秒后缀位数：0..999
+_TURN_ID_SEP = "-"                      # 日期/时间/毫秒三段之间的分隔符
+
 
 @dataclass
 class TurnRecord:
@@ -68,12 +75,21 @@ def new_turn_id(now: float | None = None) -> str:
     """生成 turn id: ``YYYYMMDD-HHMMSS-mmm``。
 
     Args:
-        now: 可选 epoch 秒,用于测试时注入固定时间。``None`` 表示用
-            ``time.time()`` 当前值。
+        now: 可选 epoch 秒,用于测试时注入固定时间。必须为非负数
+            (epoch 自 1970-01-01 起算;负值会得到 1969 日期,无意义)。
+            ``None`` 表示用 ``time.time()`` 当前值。
 
     Returns:
         时间格式字符串 ID,例如 ``"20260125-143022-123"``。秒以下
         部分用 ``int(t*1000) % 1000`` 取毫秒,确保同秒多次调用能区分。
+
+    Raises:
+        ValueError: ``now`` 不为 ``None`` 且 < 0（边界条件：epoch
+            秒不可能为负;早 fail 比静默产生 1969 日期更安全）。
     """
+    if now is not None and now < 0:
+        raise ValueError(f"now must be non-negative epoch seconds, got {now}")
     t = now if now is not None else time.time()
-    return time.strftime("%Y%m%d-%H%M%S", time.localtime(t)) + f"-{int(t * 1000) % 1000:03d}"
+    prefix = time.strftime(_TURN_ID_FMT_PREFIX, time.localtime(t))
+    ms = int(t * 1000) % 1000
+    return f"{prefix}{_TURN_ID_SEP}{ms:0{_TURN_ID_MS_DIGITS}d}"
