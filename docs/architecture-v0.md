@@ -7,7 +7,8 @@
 > [ADR-0005](adr/0005-architecture-v0-sync-watchdog-and-tool-rename.md)（v0.2.5 首次 sync，commit 4b390f19 被 revert） /
 > [ADR-0006](adr/0006-architecture-v0-resync-after-revert.md)（v0.2.5 重做） /
 > [ADR-0007](adr/0007-architecture-v0-tool-count-read-file-original-size.md)（v0.3 工具面 + read_file.original_size sync） /
-> [ADR-0008](adr/0008-architecture-v0-util-heartbeat-and-memory-5-8-lru.md)（v0.2.7 重做：util/heartbeat.py + memory schema 5.8 LRU；前次 commit b78638d1 被 revert）。
+> [ADR-0008](adr/0008-architecture-v0-util-heartbeat-and-memory-5-8-lru.md)（v0.2.7 重做：util/heartbeat.py + memory schema 5.8 LRU；前次 commit b78638d1 被 revert） /
+> [ADR-0009](adr/0009-architecture-v0-util-http-parents-and-registry-settings-coupling.md)（v0.2.8：util/http_parents.py 抽取 + build_default_registry 配置来源从传参改为读 Settings）。
 
 ## 一、五大核心
 
@@ -29,12 +30,13 @@
   守护窗口由 `settings.heartbeat_timeout_s` 控制（当前 60s），并非"24h"那种长周期。
   `runtime_state.json` 路径在 `tools/blacklist.py` 黑名单里，Agent 不可改、自愈路径不被 Agent 干扰。
 - **util/** 是按"出现 2+ 次且 ≥5 行"原则抽出的共享小工具，避免过早抽象。
-  当前 **6 个模块**：`json_utils` / `jsonl_utils` / `subprocess_utils` / `diary_archive` / `git_helpers` / `heartbeat`
-  （见 ADR-0001 D1；v0.1.1 +diary_archive/git_helpers；v0.2.7 +heartbeat，见 ADR-0008）。
-  `heartbeat.py::start_heartbeat_thread(stop_predicate, interval_s, name)` 把 main.py 中
-  两处重复的 7 行 `while not <stop>: try: rs.heartbeat(); except: pass; wait(<interval>)`
-  模板收敛到一处；`util/__init__.py` 不 re-export，调用方按 `from xragent.util.heartbeat import ...` 直接用
-  （main.py 当前用法）。
+  当前 **7 个模块**：`json_utils` / `jsonl_utils` / `subprocess_utils` / `diary_archive` / `git_helpers` /
+  `heartbeat` / `http_parents`（见 ADR-0001 D1；v0.1.1 +diary_archive/git_helpers；v0.2.7 +heartbeat，见 ADR-0008；
+  v0.2.8 +http_parents，见 ADR-0009）。
+  `heartbeat.py::start_heartbeat_thread(...)` 与 `http_parents.py::setup_http_parents_channel(...)` 分别把
+  main.py 中两段重复模板（heartbeat 7 行 while + try/except + wait；HTTP 父母通道 6+ 行 register + start + print）
+  收敛到 util/，调用方按 `from xragent.util.<module> import ...` 直接用；`util/__init__.py` 不 re-export
+  （与 v0.1.1 起保持一致，避免隐式副作用）。
 - **压缩策略**：`compression/hook.py` 是策略注册表，`compression/simple.py` 是默认实现；
   `react_loop.py` 在每轮 ReAct 已调用 `memory.compress_if_needed(...)`（详见 ADR-0002 D3）。
 
@@ -79,9 +81,10 @@ src/xragent/
 ├── tools/diary_tools.py       # diary_write
 ├── tools/git_tools.py         # git_commit / git_push / snapshot_cleanup（medium，见 ADR-0007）
 ├── tools/evolve_tools.py      # propose_self_replace / terminate（高危，HITL 门控）
-├── util/                      # 6 个模块：json_utils / jsonl_utils / subprocess_utils
-│                             #          / diary_archive / git_helpers / heartbeat
-│                             #   heartbeat.py: start_heartbeat_thread（v0.2.7，见 ADR-0008）
+├── util/                      # 7 个模块：json_utils / jsonl_utils / subprocess_utils
+│                             #          / diary_archive / git_helpers / heartbeat / http_parents
+│                             #   heartbeat.py:   start_heartbeat_thread（v0.2.7，见 ADR-0008）
+│                             #   http_parents.py: setup_http_parents_channel（v0.2.8，见 ADR-0009）
 └── llm/                       # 占位包，目前仅 __init__.py
 ```
 
@@ -128,7 +131,7 @@ src/xragent/
 | AGENTS.md / .env / runtime_state.json / .git/ 不可改 | `tools/blacklist.py` 路径黑名单（`write_blacklist`） |
 | 危险 binary 不可用 | `config/settings.py::cmd_blacklist` + `cmd_blacklist_patterns`（v0.2.3 后增量） |
 | HIL 通道是父母 | `hitl/gate.py`（仅响应人类父母指令） |
-| 高危工具须审批 | `build_default_registry` 传 `evolution_enabled` 决定 evolution_tools 是否注册 |
+| 高危工具须审批 | `tools/registry.py::build_default_registry()` 无参调用；自动读 `Settings.evolution_enabled`，<br>`False` 时 unregister `propose_self_replace` + `terminate`（剩 15 个） |
 | Diary 是真相 | `diary/YYYY-MM-DD.md` 人类可读 + `diary/turns/*` 结构化日志（Agent 不可自我粉饰） |
 | 失败可回滚 | `snapshot/side_git.py` 每 turn tag + v0.2.3 后 `cleanup_old_snapshots` 自动清理过期 tag（见 ADR-0003）；HUMAN 暴露成 `snapshot_cleanup` 工具供父母手动触发（见 ADR-0007） |
 | Push 节流 | `push_interval_minutes=30`（autonomous 模式每 30 min 批量 push 一次） |
@@ -148,4 +151,5 @@ src/xragent/
 | v0.2.5 | 架构 doc 同步：watchdog/ 入表 + tools/ 重命名 4 文件 + 风险档位 medium + 自愈不变量（首次 ADR-0005 commit 4b390f19 被 revert，本轮 ADR-0006 重做） | ADR-0005 / ADR-0006（本文档） |
 | v0.2.6 | 架构 doc 同步：工具面 15 → 17（+snapshot_cleanup +memory_recall_by_tag）+ read_file.original_size + memory_tools 注释 4→5 | ADR-0007 |
 | v0.2.7 | 架构 doc 同步：util/heartbeat.py 抽取（5 → 6 模块）+ memory schema 5.8 LRU（`last_accessed_ts` / `touch_fact` / `recall_lru`）。util/heartbeat.py 落地 commit `1a3d1d42`；doc 同步 commit `b78638d1` 被 `348d6f33` revert，round 158 close-out commit `381c5b8b` 被 `ed2bcb3b` revert；本 ADR-0008 重做 | ADR-0008 |
+| v0.2.8 | 架构 doc 同步：util/http_parents.py 抽取（6 → 7 模块）+ tools/registry.build_default_registry 不再接 evolution_enabled 参数（自动读 Settings.evolution_enabled）。util/http_parents.py 落地 commit `7bd65f9a`；本 ADR-0009 doc sync | ADR-0009 |
 | v0.3 (planned) | 长期记忆强化（recall 工具全量上线 ✅；待办：摘要压缩 hook 强化） | 待定 |
