@@ -1,8 +1,8 @@
 """subprocess 工具：抽 main.py 和 side_git.py 的 git subprocess.run 模板。
 
-**起因** (演化任务 "Refactor: 抽 subprocess.run git 模板"):
-3 处都重复 ``subprocess.run(["git", ...], cwd=str(...), capture_output=True,
-text=True, [encoding=...], [timeout=...])`` 这串 5+ 行 kwargs, 区别只在错误处理:
+**起因** (演化任务 "Refactor: 抽 subprocess.run git 模板"): 3 处都重复
+``subprocess.run(["git", ...], cwd=str(...), capture_output=True, text=True,
+[encoding=...], [timeout=...])`` 这串 5+ 行 kwargs, 区别只在错误处理:
 
   - src/xragent/main.py::cmd_autonomous.maybe_periodic_push
     ``git rev-list --count``, 5s timeout, 异常吞掉 → n=0
@@ -28,6 +28,10 @@ subprocess 调用并提取三件套"职责, 再抽一层反而割裂语义。净
 **typing (本轮)**: ``cwd`` 类型注解 ``Path | str | None`` 之前缺 ``Path`` 的 import,
 靠 ``from __future__ import annotations`` 兜住 (lazy 评估)。补 ``from pathlib import
 Path`` 让运行时也能解析 (e.g. ``typing.get_type_hints`` / Sphinx 文档生成)。
+
+**__all__ (本轮)**: 补 ``__all__`` 显式导出, 与 git_helpers.py / http_parents.py
+保持一致; ``RC_RUNTIME_FAIL`` 是哨兵常量, 调用方 (git_helpers.git_count_ahead
+判断 ``rc != 0``) 也需要 import, 一并列出。
 """
 from __future__ import annotations
 
@@ -84,3 +88,6 @@ def run_capture(
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
         # 吞掉统一异常: 调用方通常想要"git 失败了 → n=0 / 走 fallback", 不要裸崩
         return (RC_RUNTIME_FAIL, "", str(e).strip())
+
+
+__all__ = ["run_capture", "RC_RUNTIME_FAIL"]
