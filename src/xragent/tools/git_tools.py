@@ -4,15 +4,17 @@
   - ``git_push`` 加 ``timeout_s`` 参数（默认 30s，与 ``exec_tools`` 一致）。
     此前 ``git push`` 直接调 ``subprocess.run`` 无 timeout,网络卡住或 SSH
     挂起会让 LLM 工具调用无限阻塞,直到外层 ReAct 循环超时。修法:
-      * 抽 ``_fail(msg, **extras)`` 统一 ``ok=False`` 字典（与 exec_tools 对齐）
-      * 抽 ``_resolve_timeout(value, *, default) -> int`` 归一化 timeout 输入
-        (None / bool / 非数值 / 非正数 → default;其余 ``int(value)``)
+      * 抽 ``_fail(msg, **extras)`` 统一 ``ok=False`` 字典(注意: 本工具用
+        ``msg`` 键, 与 ``exec_tools._fail`` 用的 ``error`` 键不同 —— 是
+        test_git_tools_timeout.py:81 / test_exec_tools.py:216 锁住的
+        有意契约分歧, 不要合并)
+      * ``_resolve_timeout(value, *, default) -> int`` 现在委托给
+        :func:`xragent.tools.exec_tools._coerce_int` (后者已被
+        ``run_cmd`` / ``_truncate_output`` 共用, 是真正的公共 helper)。
+        保留 ``(value, *, default)`` 形式仅为兼容 test_git_tools_timeout.py
+        里 8 条直接调用 ``git_tools._resolve_timeout(..., default=N)`` 的断言。
       * 捕获 ``subprocess.TimeoutExpired`` 转 ``ok=False, msg="超时（>{t}s）"``
       * 捕获 ``FileNotFoundError`` / ``OSError`` 转 ``ok=False, msg="<type>: <e>"``
-  - ``git_commit`` 不动: 内部是本地 ``git commit``,默认 30s 在 conftest 的
-    裸本地仓库里几乎不可能超时;真要卡也由 ``SideGit`` 内的 ``RuntimeError``
-    抛出后被 ``registry`` 的兜底 ``except Exception`` 转成 ``ok=False``,
-    与现有契约一致。
 
 **v0.5.5 snapshot_cleanup**: 加 ``snapshot_cleanup`` 薄包装,把
 ``SideGit.cleanup_old_snapshots`` 暴露成 ``medium`` 风险工具 (只动本地
@@ -26,6 +28,7 @@ import subprocess
 from typing import Any
 
 from ..snapshot.side_git import SideGit
+from .exec_tools import _coerce_int
 
 
 # === 常量：与 exec_tools 对齐，便于两处工具 timeout 行为一致 ===
@@ -46,17 +49,15 @@ def _fail(msg: str, /, **extras: Any) -> dict[str, Any]:
 def _resolve_timeout(value: object, *, default: int) -> int:
     """归一化 timeout 输入到合法正整数。
 
-    拒绝: ``None`` / ``bool`` (Python 里 ``bool`` 是 ``int`` 子类, 必须先排除
-    否则 ``True`` 会被当 ``1``) / 非 ``int | float`` / 非正数 (含 0)。
-    通过: 其他 ``int | float`` → ``int(value)``。
+    委托给 :func:`xragent.tools.exec_tools._coerce_int`, 与 ``run_cmd``
+    / ``_truncate_output`` 走同一份兜底矩阵 (None / bool / 非数值 /
+    非正数 → default)。``min_value=1`` 保证 ``0`` 也走 fallback —— 与
+    原版 ``value <= 0 → default`` 语义一致。
+
+    保留 ``(value, *, default)`` 签名仅为兼容 test_git_tools_timeout.py
+    里 ``git_tools._resolve_timeout(None, default=30)`` 等 8 条直接调用。
     """
-    if value is None or isinstance(value, bool):
-        return default
-    if not isinstance(value, (int, float)):
-        return default
-    if value <= 0:
-        return default
-    return int(value)
+    return _coerce_int(value, default, min_value=1)
 
 
 def git_commit(message: str) -> dict[str, Any]:
