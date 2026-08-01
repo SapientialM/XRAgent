@@ -20,8 +20,8 @@ from .core.react_loop import ReActLoop
 from .hitl.gate import HitlGate
 from .memory.manager import MemoryManager
 from .tools.registry import build_default_registry
+from .util.git_helpers import git_count_ahead
 from .util.heartbeat import start_heartbeat_thread
-from .util.subprocess_utils import run_capture
 from .watchdog import runtime_state as rs
 
 
@@ -307,18 +307,10 @@ def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
     def _count_unpushed_commits() -> int:
         """数 HEAD 比 origin/main 多的 commit 数（=未推的本地 commit 数）。
 
-        通过 :func:`xragent.util.subprocess_utils.run_capture` 调
-        ``git rev-list --count``，超时/IO 异常时返回 0（与原 inline ``try/except``
-        行为一致：把 TimeoutExpired/FileNotFoundError/OSError 全部视为"没未推 commit"）。
-        ``rc >= 0`` 表示子进程正常返回（即使 rc != 0，stdout 仍可能非空，
-        例如本地无 origin/main 时返回 0 但 stdout 有数据；继续解析即可）。
+        v0.3.1 refactor: 改走 ``util.git_helpers.git_count_ahead``，统一 ``git rev-list --count`` 模板；
+        失败/超时/无 origin 都返回 0（与原 inline try/except 行为一致）。
         """
-        rc, out, _err = run_capture(
-            ["git", "rev-list", "--count", "origin/main..HEAD"],
-            cwd=s.repo_root,
-            timeout=5,
-        )
-        return int(out.strip() or 0) if rc >= 0 else 0
+        return git_count_ahead(cwd=s.repo_root)
 
     def maybe_periodic_push(force: bool = False) -> None:
         """按 ``push_interval_minutes`` 节流调一次 ``sg.push()``；无新 commit 则空转。
