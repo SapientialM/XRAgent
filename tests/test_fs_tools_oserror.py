@@ -97,3 +97,44 @@ def test_list_dir_unchanged_on_oserror_free_path(repo_root: Path):
     assert out["ok"] is True
     # 确保模块级 fs_tools 没意外被换掉
     assert fs_tools.read_file is read_file
+
+def test_io_fail_helper_formats_error_uniformly():
+    """``_io_fail`` 必须严格对齐 ``"<prefix>: <type_name>: <msg>"`` 契约。
+
+    三个 fs 工具 (read_file / list_dir / write_file) 都走这个 helper 拼
+    OSError 错误文案。如果未来有人在 helper 里改格式 (比如把 ``:`` 换
+    成 ``-``, 或者把 type name 砍掉), LLM 在日志里 grep 的锚点
+    ("读取失败: PermissionError") 就会失效 —— 这个测试守这一契约。
+    """
+    err = fs_tools._io_fail("读取失败", PermissionError(13, "Permission denied", "/x"))
+    assert err == {
+        "ok": False,
+        "error": "读取失败: PermissionError: [Errno 13] Permission denied: '/x'",
+    }
+
+
+def test_io_fail_helper_propagates_ok_false():
+    """返回字典必须 ok=False, 不能误返 ok=True 让 LLM 以为成功。"""
+    out = fs_tools._io_fail("写入失败", OSError(28, "No space left on device"))
+    assert out["ok"] is False
+    assert "写入失败" in out["error"]
+
+
+def test_io_fail_helper_uses_subclass_name_not_oserror():
+    """``type(exc).__name__`` 必须反映 *实际* 子类, 不能被退化成 "OSError"。
+
+    之前 inline 版本写 ``type(e).__name__`` 是对的, 但 helper 化之后
+    有人可能图省事写成 ``"OSError"`` 字面量 —— 这个测试守类型保真。
+    """
+    class FakeQuotaError(OSError):
+        pass
+    out = fs_tools._io_fail("写入失败", FakeQuotaError("quota exceeded"))
+    assert "FakeQuotaError" in out["error"], out
+    # 且必须不是字面量 "OSError" 占位
+    assert "OSError:" not in out["error"] or out["error"].count(":") >= 2
+
+
+def test_io_fail_helper_does_not_swallow_message():
+    """原 ``e`` 消息必须出现在 error 字符串里 (LLM 要看的诊断信息)。"""
+    out = fs_tools._io_fail("列出失败", FileNotFoundError(2, "No such file or directory", "/y"))
+    assert "No such file or directory" in out["error"], out

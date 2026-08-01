@@ -34,6 +34,19 @@ def _fail(error: str) -> dict[str, Any]:
     return {"ok": False, "error": error}
 
 
+def _io_fail(prefix: str, exc: OSError) -> dict[str, Any]:
+    """``OSError -> ok=False`` 统一格式化 helper。
+
+    收敛 read_file / list_dir / write_file 三处 OSError 兜底, 之前 4 个
+    callsite 各自写 ``_fail(f"{prefix}: {type(e).__name__}: {e}")``,
+    文案漂移风险大 (前缀不同但 ``: {type}: {msg}`` 这层格式必须严格对齐,
+    否则 LLM 在日志里 grep "读取失败: PermissionError" 这类锚点会失
+    效)。现在收口到 helper, 文案契约 ``"<prefix>: <type_name>: <msg>"``
+    由 ``test_io_fail_helper_formats_error_uniformly`` 锁定。
+    """
+    return _fail(f"{prefix}: {type(exc).__name__}: {exc}")
+
+
 def _read_text_capped(path: Path, *, max_bytes: int | None) -> tuple[str, bool]:
     """读取 ``path`` 的 utf-8 文本, 必要时按字节截断。
 
@@ -198,7 +211,7 @@ def read_file(path: str, max_bytes: int | None = None) -> dict[str, Any]:
     except OSError as e:
         # PermissionError / IsADirectoryError (race) / 等落到这里。
         # 之前直接上抛会破坏 "工具始终返回 dict" 的承诺 (test_fs_tools_oserror.py 锁)。
-        return _fail(f"读取失败: {type(e).__name__}: {e}")
+        return _io_fail("读取失败", e)
     # 独立 stat 拿原始字节数; 截断路径下 _read_text_capped 内部已 stat 过一次,
     # 多花一次 stat (μs 级) 换来 read_file 公开契约里 original_size 字段稳定
     # 且 _read_text_capped 签名 2-tuple 不破——白盒测试 ``_read_text_capped`` 锁的就是 2-tuple。
@@ -246,7 +259,7 @@ def list_dir(path: str = ".") -> dict[str, Any]:
         children = sorted(target.iterdir(), key=lambda p: p.name)
     except OSError as e:
         # 目录权限被收回 / 突然被卸载等。test_fs_tools.py 新增 case 锁此契约。
-        return _fail(f"列出失败: {type(e).__name__}: {e}")
+        return _io_fail("列出失败", e)
     repo_root: Path = get_settings().repo_root
     entries: list[dict[str, Any]] = []
     for child in children:
@@ -313,10 +326,10 @@ def write_file(path: str, content: str) -> dict[str, Any]:
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
-        return _fail(f"写入失败: {type(e).__name__}: {e}")
+        return _io_fail("写入失败", e)
     try:
         target.write_text(content, encoding="utf-8")
     except OSError as e:
-        return _fail(f"写入失败: {type(e).__name__}: {e}")
+        return _io_fail("写入失败", e)
     rel = target.relative_to(get_settings().repo_root).as_posix()
     return {"ok": True, "path": rel, "size": len(content)}
