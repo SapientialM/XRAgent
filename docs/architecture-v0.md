@@ -10,6 +10,7 @@
 > [ADR-0008](adr/0008-architecture-v0-util-heartbeat-and-memory-5-8-lru.md)（v0.2.7 重做：util/heartbeat.py + memory schema 5.8 LRU；前次 commit b78638d1 被 revert） /
 > [ADR-0009](adr/0009-architecture-v0-util-http-parents-and-registry-settings-coupling.md)（v0.2.8：util/http_parents.py 抽取 + build_default_registry 配置来源从传参改为读 Settings）。
 > [ADR-0010](adr/0010-architecture-v0-autonomous-iter-tasks-and-hitl-gate-pure-functions.md)（v0.2.9：autonomous.iter_tasks 生成器 + hitl/gate._parse_stdin_line 纯函数化）。
+> [ADR-0011](adr/0011-architecture-v0-registry-internals-tracked-files-and-autonomous-window-s.md)（v0.2.10 + v0.2.11 重做：registry 内部结构展开 + manager.py.bak / __tools_probe__.txt 留痕 + autonomous.next_task window_s + hook.py import 整理；前次 commit 4f970a4d 被 revert）。
 
 ## 一、五大核心
 
@@ -26,7 +27,7 @@
 - **自驱动（autonomous）** 不是 AGI，是"按 task templates + ReAct + commit"在没人在时也稳定推进的循环；
   模板见 `src/xragent/autonomous.py::TASK_TEMPLATES`（共 8 个），默认冷却 2h（`DEFAULT_COOLDOWN_S=7200`），
   `memory/queue.jsonl` 留痕（不入 git）。
-  公开 API：`next_task(rng)` 选一个不在 cooldown 里的任务；`record_done(task, turn_id, summary)` append-only 留痕；
+  公开 API：`next_task(rng=None, window_s=DEFAULT_COOLDOWN_S)` 选一个不在 cooldown 里的任务；`window_s` 可调（v0.2.11，见 ADR-0011 D4），便于测试时短时间绕过冷却、不污染 module 常量；`record_done(task, turn_id, summary)` append-only 留痕；
   **`iter_tasks(stop_check)`** 是生成器（v0.2.9，见 ADR-0010），每次 `next()` 拉一次 `next_task()`，直到 `stop_check()` 返回
   True 才停 —— 落地测试用，main.py 主循环当前仍走 imperative `next_task` 路径（待后续切换）；
   3 个 module-level helper：`task_queue_path()` / `task_cooldown_key(task)` / `_recent_titles(window_s)` 全部带
@@ -66,8 +67,14 @@ src/xragent/
 ├── core/react_loop.py         # ReAct 主循环（含 compress_if_needed 调用）
 ├── memory/manager.py          # MemoryManager：SQLite 长期事实 + compress_if_needed 封装
 │                             # 当前 schema 5.8（v0.2.7），见 ADR-0004 + ADR-0008
+│                             #   ── v0.2.10 留痕：schema 5.5 之前快照
+│                             #     memory/manager.py.bak（git tracked，commit 43f68ada），
+│                             #     当前不被 import，清理决策留给后续轮次（见 ADR-0011 D2）
+├── memory/manager.py.bak      # schema 5.5 之前快照（git tracked，round 147 commit 43f68ada，
+│                             #   不被 import；清理决策留给后续轮次，见 ADR-0011 D2）
 ├── compression/simple.py      # 最简压缩（SimpleCompression.compress）
-├── compression/hook.py        # 压缩策略注册表（已注册 simple）
+├── compression/hook.py        # 压缩策略注册表（已注册 simple）；v0.2.10 import 整理
+│                             # （顶部 import + 无 noqa；见 ADR-0011 D5）
 ├── snapshot/side_git.py       # 每个 turn snapshot
 │                             # v0.2.3 新增 cleanup_old_snapshots()，见 ADR-0003
 ├── watchdog/__init__.py
@@ -76,13 +83,27 @@ src/xragent/
 ├── evolve/metamorphosis.py    # 金蝉脱壳：编译新 main.py 并切换 entry
 ├── evolve/generations.py      # generations.jsonl 留痕
 ├── autonomous.py              # 定时巡检 + TASK_TEMPLATES（8 个）+ queue.jsonl
-│                             # 公开 API：next_task / record_done / iter_tasks（v0.2.9 生成器，见 ADR-0010）
-│                             #          + task_queue_path / task_cooldown_key / _recent_titles（v0.2.9 公开化）
+│                             # 公开 API：next_task(rng=None, window_s=DEFAULT_COOLDOWN_S)
+│                             #          / record_done / iter_tasks（v0.2.9 生成器，见 ADR-0010）
+│                             #          + task_queue_path / task_cooldown_key / _recent_titles（v0.2.9 公开化）；
+│                             #   next_task 加 window_s 参数（v0.2.11，见 ADR-0011 D4），便于测试时短时间绕过冷却
 ├── hitl/gate.py               # HITL 门（高危动作 / 高危工具审批）
 │                             # 内部：_parse_stdin_line 纯函数 + _DEFAULT_POLICIES dict（v0.2.9，见 ADR-0010）
 ├── http_server.py             # HTTP 父通道（补全 HIL 通道，见 ADR-0001 D2）
-├── tools/registry.py          # build_default_registry()：注册 17 个工具
-│                             # （v0.2.3 后 +1：memory_recall，见 ADR-0004；
+├── tools/registry.py          # build_default_registry() + 完整 ToolRegistry 注册中心
+│                             # （v0.2.10 抽出 _safe_call helper，305 行，结构展开）：
+│                             #   - ToolDef dataclass（name/description/input_schema/risk/handler）
+│                             #   - ToolRegistry class 六方法：register / unregister / get / names / specs / run
+│                             #   - 5 module-level helper：
+│                             #       _HitlRejected sentinel（避免 rejection 走 handler 异常分支）
+│                             #       _HitlOutcome NamedTuple（args / approved / rejected）
+│                             #       _call_gate(gate, req)：兼容 callable gate 与 .request() 对象
+│                             #       _apply_hitl(name, td, args, gate)：低风险/gate=None 直通；高风险走审批
+│                             #       _safe_call(handler, args)：handler 抛 Exception 统一包 error envelope；
+│                             #         BaseException（KeyboardInterrupt/SystemExit）不吞
+│                             #   - run 流程：get → _apply_hitl 决策 → rejected 走 blocked envelope →
+│                             #     否则 _safe_call 包异常 → approved 加 hitl_approved: True（见 ADR-0011 D1）
+│                             # 默认注册 17 个工具（v0.2.3 后 +1：memory_recall，见 ADR-0004；
 │                             #  v0.3 后 +1：memory_recall_by_tag，见 ADR-0007）
 │                             # evolution_enabled=false 时剩 15 个（去 propose_self_replace + terminate）
 ├── tools/blacklist.py         # 路径围栏 + 黑名单校验（含 runtime_state.json 路径）
@@ -98,6 +119,8 @@ src/xragent/
 │                             #          / diary_archive / git_helpers / heartbeat / http_parents
 │                             #   heartbeat.py:   start_heartbeat_thread（v0.2.7，见 ADR-0008）
 │                             #   http_parents.py: setup_http_parents_channel（v0.2.8，见 ADR-0009）
+├── __tools_probe__.txt        # 47 bytes 探针残留（commit 91ea0843 同期，git tracked，
+│                             #   当前不被 import，清理决策留给后续轮次，见 ADR-0011 D3）
 └── llm/                       # 占位包，目前仅 __init__.py
 ```
 
@@ -150,6 +173,11 @@ src/xragent/
 | Push 节流 | `push_interval_minutes=30`（autonomous 模式每 30 min 批量 push 一次） |
 | 子进程异常可自愈 | `watchdog/supervisor.py` 定期读 `runtime_state.json` heartbeat，超过 `heartbeat_timeout_s` 未更新则判僵死、SIGTERM 后 fork 新子进程并 `bump_restart()`；累计 `restart_max_failures` 次失败后停。`runtime_state.json` 在 `write_blacklist` 里，Agent 不可改、自愈路径不被 Agent 干扰（见 ADR-0005 / ADR-0006） |
 | read_file 契约演进 | `tools/fs_tools.py::read_file` v0.3+ 多返回 `original_size` 字段（截断场景下与 `size` 不同，让父母看到真实大小），见 ADR-0007 |
+| tools/registry run 流程契约 | `tools/registry.py` v0.2.10 起：get → _apply_hitl 决策 → rejected 走 blocked envelope → 否则 _safe_call 包 Exception → approved 加 `hitl_approved: True`；handler 抛 BaseException（KeyboardInterrupt/SystemExit）不吞；hitl=low 或 gate=None 直通；callable gate 与 .request() 对象兼容（见 ADR-0011 D1） |
+| Autonomous next_task 参数化冷却 | `autonomous.next_task(rng=None, window_s=DEFAULT_COOLDOWN_S)` v0.2.11 起：`window_s` 显式参数（默认 7200s），不污染 module 常量，便于测试短时间绕过冷却（见 ADR-0011 D4） |
+| Memory schema 5.5 之前快照留痕 | `memory/manager.py.bak` v0.2.10 起：git tracked（commit 43f68ada），当前不被 import，仅作 schema 演进回溯点；清理决策留给后续轮次（见 ADR-0011 D2） |
+| tools/registry 探针文件留痕 | `src/xragent/__tools_probe__.txt` v0.2.10 起：47 bytes 探针残留（commit 91ea0843 同期），git tracked，不被 import；清理决策留给后续轮次（见 ADR-0011 D3） |
+| compression/hook.py import 清洁 | `compression/hook.py` v0.2.10 起：顶部 import 整理、无 noqa 残留；保持 hook 表可读性（见 ADR-0011 D5） |
 
 ## 五、版本对照
 
@@ -166,4 +194,6 @@ src/xragent/
 | v0.2.7 | 架构 doc 同步：util/heartbeat.py 抽取（5 → 6 模块）+ memory schema 5.8 LRU（`last_accessed_ts` / `touch_fact` / `recall_lru`）。util/heartbeat.py 落地 commit `1a3d1d42`；doc 同步 commit `b78638d1` 被 `348d6f33` revert，round 158 close-out commit `381c5b8b` 被 `ed2bcb3b` revert；本 ADR-0008 重做 | ADR-0008 |
 | v0.2.8 | 架构 doc 同步：util/http_parents.py 抽取（6 → 7 模块）+ tools/registry.build_default_registry 不再接 evolution_enabled 参数（自动读 Settings.evolution_enabled）。util/http_parents.py 落地 commit `7bd65f9a`；本 ADR-0009 doc sync | ADR-0009 |
 | v0.2.9 | 架构 doc 同步：autonomous.py 加 `iter_tasks(stop_check)` 生成器（公开 API）+ 3 helper 公开化（task_queue_path / task_cooldown_key / _recent_titles）；hitl/gate.py 加 `_parse_stdin_line(line)` 纯函数 + `_DEFAULT_POLICIES: dict[str, Decision]` 收敛 2 个硬编码 if 分支。autonomous.py 落地 commit `7bd65f9a`；hitl/gate.py 落地 commit `ecc0d468`；本 ADR-0010 doc sync | ADR-0010 |
+| v0.2.10 | 架构 doc 同步：tools/registry.py 内部结构展开（ToolDef dataclass + ToolRegistry 6 方法 + 5 module-level helper：_HitlRejected / _HitlOutcome / _call_gate / _apply_hitl / _safe_call + run 流程契约）+ memory/manager.py.bak 留痕（schema 5.5 之前快照，git tracked 不被 import）+ __tools_probe__.txt 留痕（47 bytes 探针残留，git tracked 不被 import）+ compression/hook.py import 整理（顶部 import + 无 noqa）。前次 commit `4f970a4d` 被 `6b7f3a99` revert；本 ADR-0011 重做 | ADR-0011 |
+| v0.2.11 | 架构 doc 同步：autonomous.next_task 加 `window_s` 参数（默认 `DEFAULT_COOLDOWN_S=7200`），测试可短时间绕过冷却、不污染 module 常量；落地 commit `65b75fae`；本 ADR-0011 D4 doc sync | ADR-0011 |
 | v0.3 (planned) | 长期记忆强化（recall 工具全量上线 ✅；待办：摘要压缩 hook 强化） | 待定 |
