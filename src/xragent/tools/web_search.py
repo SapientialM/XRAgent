@@ -14,6 +14,12 @@
   区分 *超时* 与 *其他网络错* (返回 envelope 多一个 ``timed_out=True``).
   此前两个工具都 hardcode ``REQUEST_TIMEOUT_S=20``, Agent 没法在网络抖动
   时缩短超时加快反馈, 也没法在目标站慢响应时拉长超时拿到内容.
+* **v0.5.7 _resolve_timeout dedup**: ``_resolve_timeout`` 现在委托给
+  :func:`xragent.tools.exec_tools._coerce_int` (round 172 已让
+  ``git_tools._resolve_timeout`` 走同一份 helper). 删掉第三份手写矩阵
+  (None / bool / 非数值 / 非正数 → default), 行为完全等价, ``min_value=1``
+  覆盖 ``<= 0`` 兜底. ``_fail`` 不动 — ``error`` vs ``msg`` 键的差异是
+  test_web_search / test_git_tools 测试锁住的有意契约分歧.
 """
 from __future__ import annotations
 
@@ -25,6 +31,8 @@ import urllib.parse
 import urllib.request
 from typing import Any
 from urllib.error import HTTPError, URLError
+
+from .exec_tools import _coerce_int
 
 # ---------------------------------------------------------------------------
 # 常量 (单一来源, 测试与文档都引用这里)
@@ -99,20 +107,16 @@ def _fail(msg: str, /, **extras: Any) -> dict[str, Any]:
 def _resolve_timeout(value: object, *, default: int) -> int:
     """归一化 timeout 输入到合法正整数.
 
-    拒绝: ``None`` / ``bool`` (Python 里 ``bool`` 是 ``int`` 子类, 必须先排除
-    否则 ``True`` 会被当 ``1``) / 非 ``int | float`` / 非正数 (含 0).
-    通过: 其他 ``int | float`` → ``int(value)`` (浮点截断).
+    委托给 :func:`xragent.tools.exec_tools._coerce_int` — 与
+    ``git_tools._resolve_timeout`` (round 172 已合并) 走同一份兜底矩阵
+    (None / bool / 非 ``int | float`` / 非正数 → default). ``min_value=1``
+    把 ``0`` 和负数都映射到 ``default``, 与原版 ``value <= 0 → default``
+    语义完全等价.
 
-    与 ``git_tools._resolve_timeout`` 形态一致, 失败时一律走 ``default``,
-    不抛异常 — LLM 传错类型时不应让整次工具调用崩掉.
+    保留 ``(value, *, default)`` 签名仅为对称: ``curl_url`` / ``web_search``
+    内部两处调用都是 ``_resolve_timeout(timeout_s, default=DEFAULT_CURL_TIMEOUT_S)``.
     """
-    if value is None or isinstance(value, bool):
-        return default
-    if not isinstance(value, (int, float)):
-        return default
-    if value <= 0:
-        return default
-    return int(value)
+    return _coerce_int(value, default, min_value=1)
 
 
 # ---------------------------------------------------------------------------
@@ -285,8 +289,11 @@ def curl_url(
 
     # --- 5. 执行 ---
     effective_timeout = _resolve_timeout(timeout_s, default=DEFAULT_CURL_TIMEOUT_S)
-    req = urllib.request.Request(url, data=data.encode("utf-8") if data else None,
-                                  method=method.upper())
+    req = urllib.request.Request(
+        url,
+        data=data.encode("utf-8") if data else None,
+        method=method.upper(),
+    )
     req.add_header("User-Agent", USER_AGENT)
     try:
         with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
