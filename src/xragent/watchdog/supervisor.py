@@ -20,7 +20,6 @@ def _spawn_child(extra_args: list[str] | None = None) -> subprocess.Popen:
 
     spawn 模式由 XRAGENT_SPAWN_MODE 控制：autonomous（默认）/ supervised。
     """
-    import os
     s = get_settings()
     mode = os.environ.get("XRAGENT_SPAWN_MODE", "autonomous").lower()
     if mode == "autonomous":
@@ -53,13 +52,31 @@ def _spawn_child(extra_args: list[str] | None = None) -> subprocess.Popen:
     )
 
 
+def _reap_zombies() -> None:
+    """非阻塞收割所有 zombie 子进程（POSIX waitpid -1 + WNOHANG）。
+
+    用两个 except 分支区分「无 zombie」（ChildProcessError，正常的 EAGAIN 终态）
+    和「其它异常」（真异常，比如 EINTR）→ 两种都吞掉不重试，因为 supervisor 主
+    循环下一轮还会再调一次。
+    """
+    while True:
+        try:
+            _zpid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return  # 没有 zombie 了，正常结束
+        except OSError:
+            return  # EINTR 之类，吞掉下一轮再试
+        if _zpid == 0:
+            return  # 没剩 zombie，正常结束
+
+
 def run_forever() -> None:
     """守护主循环：拉起子 Agent、监控心跳、超时重启。
 
     流程（每轮迭代）:
         1. 写 ``runtime_state.json`` 标记 supervisor 自己存活 (供外部探活)。
         2. 若 ``runtime_state.restart_suppressed`` 为真 → 退出 (parents 主动停机信号)。
-        3. ``waitpid(-1, WNOHANG)`` 收割所有 zombie 子进程。
+        3. ``_reap_zombies()`` 收割所有 zombie 子进程。
         4. ``_spawn_child()`` 拉起新子进程, 父进程与子进程同 session 组
            (``start_new_session=True``), 便于用 ``killpg`` 整组杀。
         5. 内层循环每 ``heartbeat_interval_s`` 醒来一次:
@@ -78,30 +95,21 @@ def run_forever() -> None:
     """
     s = get_settings()
     failures = 0
+    prev_child: subprocess.Popen | None = None
     while True:
         rs.heartbeat({"supervisor_pid": os.getpid()})
         state = rs.read()
         if state.get("restart_suppressed"):
             print("[supervisor] restart_suppressed detected; exit.", flush=True)
             return
-        # 批量收割所有 zombie 子进程（POSIX waitpid -1 + WNOHANG）
-        import os as _os
-        while True:
-            try:
-                _zpid, _ = _os.waitpid(-1, _os.WNOHANG)
-                if _zpid == 0:
-                    break
-            except ChildProcessError:
-                break
-            except Exception:
-                break
+        _reap_zombies()
 
-        # 回收上一个 child（兜底）
-        try:
-            if "prev_child" in dir() and prev_child is not None:
+        # 回收上一个 child（兜底；新 spawn 后旧 child 已不应存活，但保险起见 wait 一下）
+        if prev_child is not None:
+            try:
                 prev_child.wait(timeout=0)
-        except Exception:
-            pass
+            except Exception:
+                pass
 
         child = _spawn_child()
         prev_child = child
@@ -141,7 +149,11 @@ def run_forever() -> None:
             child.wait(timeout=10)
             return
 
-        rc = child.poll() if child.poll() is not None else -1
+        # child.poll() 此时必非 None（child 在上面 wait(timeout=5) 或自然 exit 后已 reap），
+        # 但保险起见给个 -1 兜底
+        rc = child.poll()
+        if rc is None:
+            rc = -1
         if rc != 0:
             failures += 1
             rs.bump_restart()
