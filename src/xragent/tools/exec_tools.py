@@ -9,6 +9,10 @@ from .blacklist import assert_command_allowed
 
 # === 常量：暴露给测试 / 外部调用方统一引用 ===
 DEFAULT_TIMEOUT_S: int = 30
+# 上限 clamp: LLM 偶尔会脑抽传 ``timeout_s=999999`` 这类天文数字,
+# 进程长时间堆积会拖垮 supervisor 心跳 + 制造隐式 attack surface
+# (慢速命令拖死整个 ReAct 循环)。超过此值一律兜底到上限本身。
+MAX_TIMEOUT_S: int = 600  # 10 分钟, 与 supervisor 心跳周期错开
 OUTPUT_TAIL_LIMIT: int = 4000
 
 # 输出被截断时夹在前/后两段之间的"省略提示"文案。带换行让 LLM 容易
@@ -16,8 +20,14 @@ OUTPUT_TAIL_LIMIT: int = 4000
 _OMITTED_MARKER: str = "\n...[省略 {n} 字]...\n"
 
 
-def _coerce_int(value: Any, default: int, *, min_value: int = 0) -> int:
-    """把任意值规范化成 ``int``, 且 ``>= min_value``。
+def _coerce_int(
+    value: Any,
+    default: int,
+    *,
+    min_value: int = 0,
+    max_value: int | None = None,
+) -> int:
+    """把任意值规范化成 ``int``, 且 ``min_value <= n <= max_value``。
 
     收敛 ``run_cmd`` / ``_truncate_output`` 里散落的"任意值 → 正整数"
     强转逻辑, 避免每次新增输出参数都要重写一遍 ``isinstance(...)`` 三连。
@@ -26,14 +36,18 @@ def _coerce_int(value: Any, default: int, *, min_value: int = 0) -> int:
 
     Args:
         value: 待归一化的值。None / bool / 非数值字符串 / 容器 → fallback。
-        default: 兜底值（已满足 ``>= min_value`` 的契约由调用方保证）。
+        default: 兜底值（已满足 ``min_value <= default <= max_value`` 的
+            契约由调用方保证）。
         min_value: 最小允许值; 传入值 < min_value 一律 fallback 到 default,
             避免负数 / 0 等导致 ``subprocess.run(timeout=0)`` 立刻报
             ``ValueError: timeout may not be negative`` 这类不友好错误。
+        max_value: 最大允许值; ``None`` 表示无上限 (向后兼容 — 调用方
+            不传时行为与旧版完全一致)。传入值 > max_value 一律 fallback
+            到 default, 防止 LLM 误传大整数让进程长时间堆积。
 
     Returns:
-        int: ``int(value)`` 当且仅当它是 int/float 且 ``>= min_value``;
-        否则 ``default``。
+        int: ``int(value)`` 当且仅当它是 int/float 且在
+        ``[min_value, max_value]`` 闭区间内; 否则 ``default``。
 
     Examples:
         >>> _coerce_int(5, 30)
@@ -48,6 +62,10 @@ def _coerce_int(value: Any, default: int, *, min_value: int = 0) -> int:
         30
         >>> _coerce_int("5", 30)
         30
+        >>> _coerce_int(999999, 30, min_value=1, max_value=600)
+        30
+        >>> _coerce_int(700, 30, min_value=1, max_value=600)
+        30
     """
     if value is None or isinstance(value, bool):
         return default
@@ -56,7 +74,51 @@ def _coerce_int(value: Any, default: int, *, min_value: int = 0) -> int:
     n: int = int(value)
     if n < min_value:
         return default
+    if max_value is not None and n > max_value:
+        return default
     return n
+
+
+def _safe_decode(value: Any) -> str:
+    """把任意值归一化成 ``str``。
+
+    抽出 ``_truncate_output`` 里散落的 ``bytes.decode / str 直传 / 其他
+    repr`` 三连, 让 :func:`_truncate_output` 专注于"截断", 让本函数专注
+    于"解码"。未来 ``web_search.py`` / ``fs_tools.py`` / ``evolve_tools.py``
+    里的同类 ``decode("utf-8", errors="replace")`` (grep 共 5+ 处) 可以
+    逐步收敛到本 helper。
+
+    Args:
+        value: 任意 ``Any``。常见输入: ``None`` / ``bytes`` / ``str`` /
+            异常对象 / 数字。LLM 工具链里偶尔会出现 ``int`` ``Exception``
+            等非预期类型, 全部走 :func:`repr` 兜底, **不抛异常**。
+
+    Returns:
+        统一 ``str``:
+            * ``None`` → 空串
+            * ``bytes`` → ``decode("utf-8", errors="replace")``
+                (无效 UTF-8 序列用 U+FFFD 替换, 与 Python 标准 ``surrogateescape``
+                之外的兜底一致; 多数场景比抛 ``UnicodeDecodeError`` 友好)
+            * ``str`` → 原样返回
+            * 其他 → ``repr(value)`` (例如 ``12345`` → ``"12345"``)
+
+    Examples:
+        >>> _safe_decode(None)
+        ''
+        >>> _safe_decode(b"hi \\xff world")
+        'hi \\ufffd world'
+        >>> _safe_decode("ok")
+        'ok'
+        >>> _safe_decode(12345)
+        '12345'
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return value
+    return repr(value)
 
 
 def _truncate_output(
@@ -85,14 +147,7 @@ def _truncate_output(
     Returns:
         统一 ``str``,头部 (可选) + 省略提示 (可选) + 尾部。
     """
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        text: str = value.decode("utf-8", errors="replace")
-    elif isinstance(value, str):
-        text = value
-    else:
-        text = repr(value)
+    text: str = _safe_decode(value)
 
     # 走公共 helper 兜底: 负数 / 非整数 / bool → default, 不再各写一遍 isinstance 三连
     head: int = _coerce_int(head_chars, default=0)
@@ -109,20 +164,33 @@ def _truncate_output(
 
 
 def _fail(error: str, /, **extras: Any) -> dict[str, Any]:
-    """ok=False 字典工厂。positional-only error; extras 显式传入才出现。"""
+    """ok=False 字典工厂。positional-only error; extras 显式传入才出现。
+
+    Returns:
+        ``dict[str, Any]`` 始终含 ``ok=False`` 和 ``error`` 两键;
+        ``**extras`` 透传 (例如 ``timeout=True``) 让调用方控制
+        错误分支的附加键集合, 不在 LLM 工具契约里引入幻键。
+    """
     out: dict[str, Any] = {"ok": False, "error": error}
     out.update(extras)
     return out
 
 
 def _resolve_timeout(timeout_s: int | float | None) -> int:
-    """归一化 timeout_s 到合法正整数。
+    """归一化 timeout_s 到合法正整数, 且 ``<= MAX_TIMEOUT_S``。
 
-    非正数 / None / bool / 非数值 → 默认 :data:`DEFAULT_TIMEOUT_S`,
+    非正数 / None / bool / 非数值 / 超大值 → 默认 :data:`DEFAULT_TIMEOUT_S`,
     避免 ``subprocess.run(timeout=0)`` 抛 ``ValueError`` 冒到 LLM 面前。
-    复用 :func:`_coerce_int` 保证兜底语义与 head/tail 一致。
+    复用 :func:`_coerce_int` 保证兜底语义与 head/tail 一致;
+    ``MAX_TIMEOUT_S`` 上限 clamp 防止 LLM 误传 ``timeout_s=999999`` 让
+    subprocess 长时间堆积拖垮 supervisor 心跳。
     """
-    return _coerce_int(timeout_s, default=DEFAULT_TIMEOUT_S, min_value=1)
+    return _coerce_int(
+        timeout_s,
+        default=DEFAULT_TIMEOUT_S,
+        min_value=1,
+        max_value=MAX_TIMEOUT_S,
+    )
 
 
 def run_cmd(
@@ -131,15 +199,21 @@ def run_cmd(
     *,
     output_head_chars: int = 0,
     output_tail_chars: int = OUTPUT_TAIL_LIMIT,
+    cwd: str | None = None,
 ) -> dict[str, Any]:
-    """在 settings.repo_root 下执行 shell 命令。
+    """在 settings.repo_root (或自定义 ``cwd``) 下执行 shell 命令。
 
     Args:
         cmd: shell 命令字符串
-        timeout_s: 超时秒数。None / 非正数 / 非数值 → 默认 30s。
+        timeout_s: 超时秒数。None / 非正数 / 非数值 / 超大值 → 默认 30s,
+            上限 clamp 到 :data:`MAX_TIMEOUT_S` (600s)。
         output_head_chars: 输出保留前 N 字 (与 ``output_tail_chars`` 配合);
             0 表示只保留尾部, 与旧版契约一致。
         output_tail_chars: 输出保留后 N 字。``head + tail`` 即输出字符上限。
+        cwd: 自定义工作目录;``None`` 走 ``settings.repo_root``。
+            传入绝对路径或相对路径都会被透传给 ``subprocess.run`` (相对
+            路径按 ``settings.repo_root`` 解析 — subprocess 的标准语义,
+            与 LLM 在 ``evolve/`` / ``scripts/`` 等子目录调试的常见需求对齐)。
 
     Returns:
         ``dict[str, Any]``, LLM 工具契约字段:
@@ -157,12 +231,13 @@ def run_cmd(
 
     from ..config.settings import get_settings
     s = get_settings()
+    effective_cwd: str = cwd if cwd is not None else str(s.repo_root)
 
     try:
         proc: subprocess.CompletedProcess = subprocess.run(
             cmd,
             shell=True,
-            cwd=str(s.repo_root),
+            cwd=effective_cwd,
             capture_output=True,
             text=True,
             timeout=effective_timeout,
