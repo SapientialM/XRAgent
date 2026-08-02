@@ -68,7 +68,7 @@ def _poll_answer(prev_ts, timeout=180.0):
     while time.time() - t0 < timeout:
         ans = _get("/last-answer")
         ts = ans.get("ts", 0)
-        if ts > prev_ts and ans.get("answer"):
+        if ts > prev_ts:
             sys.stdout.write("\r" + " " * 60 + "\r")
             sys.stdout.flush()
             return ans
@@ -239,6 +239,11 @@ def main():
         text = ans.get("answer", "")
         if text:
             print(_c("1;35", "xr> ") + text)
+            print()
+        elif ans.get("ts", 0) > 0:
+            # ts 变了说明 agent 跑了这条, 但 answer 为空 — tool_calls 多但
+            # 没停在 final text (max_steps 满 / model 没收敛). 显式告诉用户
+            print(_c("33", f"xr> (agent 回了但 answer 为空, ts={ans['ts']:.0f})"))
             print()
         else:
             print(_c("90", "(无回复)"))
