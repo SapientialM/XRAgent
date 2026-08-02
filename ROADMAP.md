@@ -108,11 +108,14 @@
       丢失的索引/method/wrapper + 5.x 5 个 import 漏)
 - [x] deadlock 触发器 patch (autonomous.py 的 "无 src/ 改动 → revert HEAD" 触发器
       显式 F-1/F-2/F-3 + G-1/G-2/G-3 分支; 历史 31 轮死循环实证不可靠)
+- [x] **SideGit snapshot cleanup 加 dry_run 输出** ✅ (round 206+ a59beb18)
+      - cleanup_old_snapshots + count_cleanup 两条路径都走 _tag_index helper
+      - 行格式 %09 / \t 改一处时不再漂移（消除 3 处重复）
+      - time-cleanup 与 count-cleanup 共享 list/delete helper
 - [ ] 优化候选 (优先级建议, 父母可调):
       - ReActLoop: 拆分 token 计量 / step 边界判断 → 单元测试粒度
       - HitlGate: 加 `risk=medium` 工具的"累计 N 次自动放行"窗口
       - MemoryManager: top_frequent / recall_lru 走 idx, 加 CLI: `xragent memory stats`
-      - SideGit: snapshot cleanup 加 dry_run 输出 (test_snapshot_cleanup 已支持 dry_run)
 - [ ] 金蝉脱壳增强:
       - metamorphose 加 pre-flight: 编译失败自动回滚 (recover HEAD)
       - generation.jsonl 加 score 字段 (pytest 通过率 / lint 0 警告)
@@ -121,6 +124,9 @@
 ## v0.5.x — 触发器盲区 (CT0 强制)
 
 - [x] autonomous.py 触发器改 F-1/F-2/F-3 + G-1/G-2/G-3 四档显式分流 (取代 31 轮死循环)
+- [x] **snapshot helper 收归 _tag_index** ✅ (round 206+ a59beb18)
+      - _list_xragent_turn_tags_with_dates / _delete_xragent_turn_tag 重复 inline 收归
+      - count_cleanup.py / cleanup_old_snapshots 两条路径共享 list + delete helper
 - [ ] agent 自己再加一道 determinstic guard: autonomous driver 在跑任务前显式
       检查 HEAD 类型, 不依赖 LLM 文本记忆. 给未来 LLM swap (5.x → 6.x) 留 robustness.
 
