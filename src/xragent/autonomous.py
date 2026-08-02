@@ -81,11 +81,29 @@ TASK_TEMPLATES = [
         ),
     },
     {
-        "title": "金蝉脱壳演练仅当有 src 改动时",
+        "title": "蜕皮安全巡逻 — 触发器盲区显式处理",
         "prompt": (
-            "检查 git diff origin/main..HEAD：\n"
-            "  - 如果含 src/ 改动 → commit → push → py_compile → 写 evolve/generations.jsonl 一行 → 推 push\n"
-            "  - 如果无 src/ 改动 → 直接 git revert HEAD --no-edit 把上一条 autonomous commit 撤回（避免空转）"
+            "先 ``git diff origin/main..HEAD --stat`` 看是否有 src/ 改动，并检查 HEAD 类型，"
+            "分四档处理（F-1/F-2 + G-1/G-2 是历史 31 轮死循环沉淀的 guard）：\n"
+            "\n"
+            "**A 真 src/ 改动（非 close-out / 非 manual revert）** → "
+            "add -A + commit + push + py_compile + 写 evolve/generations.jsonl 一行 + push（正常 src/ 推进路径）。\n"
+            "\n"
+            "**B HEAD 已是 close-out chore 或 HITL manual revert 或已 push legit refactor** → "
+            "走 *close-out*：只追加 evolve/generations.jsonl 一行 audit + 一个 chore commit，"
+            "**禁止**走 ``git revert HEAD --no-edit``（避免 revert↔reapply 套娃，保护 HITL 决策）。\n"
+            "\n"
+            "**C HEAD~1 是 Reapply 且 HEAD~2 是 Revert（嵌套 revert ping-pong）** → "
+            "走 *minimal close-out*：只 append 一行 audit，**禁止** revert（避免重启 nesting）。\n"
+            "\n"
+            "**D evolution_enabled=false** → 仅写 diary/report 一段说明，不动 git。\n"
+            "\n"
+            "判断参考命令（按顺序短路）：\n"
+            "  1. ``git log -1 --format=%s HEAD`` 看 message prefix（refactor/chore/revert/reapply 四类）。\n"
+            "  2. ``git log -1 --format=%an HEAD`` 看 author（CM / HITL 不字面 revert）。\n"
+            "  3. ``git diff origin/main..HEAD -- 'src/*'`` 看 src/ 是否真有 diff。\n"
+            "**务必先判 HEAD 类型再决定路径**，1/2/3 任一显示'HEAD 不可字面 revert'即走 B/C；"
+            "只有 1+2+3 同时允许 revert 才走字面 revert（极少出现）。"
         ),
     },
 ]

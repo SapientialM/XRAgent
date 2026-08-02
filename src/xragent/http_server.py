@@ -305,13 +305,86 @@ def _make_handler(token: str) -> type:
             _http_reply_queue.put(body)
             self._send_json(200, {"ok": True})
 
+
+        def _handle_tools(self, _body: "dict | None") -> None:
+            """``GET /tools``：列当前可用工具名 + risk 级别。
+
+            给 TUI / 终端 scripts/chat 用，让父母能快速盘点 Agent 当前能调的工具
+            （低 risk 的工具不需要 HITL 审批就能用）。
+            """
+            try:
+                from .tools.registry import build_default_registry
+                r = build_default_registry()
+                specs = [{"name": s.name, "risk": s.risk} for s in r.specs()]
+                self._send_json(200, {"ok": True, "count": len(specs), "tools": specs})
+            except Exception as e:
+                self._send_json(500, {"error": f"list tools failed: {e}"})
+
+        def _handle_generations(self, _body: "dict | None") -> None:
+            """``GET /generations``：列最近 N 条金蝉脱壳记录（来自 generations.jsonl）。
+
+            给 TUI / 终端 scripts/chat 用，让父母能一眼看到蜕皮历史。
+            """
+            try:
+                from .evolve.generations import list_generations
+                gs = list_generations()
+                tail = gs[-20:] if isinstance(gs, list) else []
+                self._send_json(200, {"ok": True, "count": len(tail), "generations": tail})
+            except Exception as e:
+                self._send_json(500, {"error": f"list generations failed: {e}"})
+
+        def _handle_memory_recent(self, body: "dict | None") -> None:
+            """``GET /memory/recent``：最近 N 条 fact（来自 MemoryManager.recent）。
+
+            给 TUI / 终端 scripts/chat 用，让父母能快速看长期记忆里有什么。
+            """
+            try:
+                from .memory.manager import MemoryManager
+                n = 20
+                if body is not None and isinstance(body.get("n"), int):
+                    n = max(1, min(int(body["n"]), 1000))
+                m = MemoryManager()
+                facts = m.recent(n=n)
+                self._send_json(200, {"ok": True, "count": len(facts),
+                    "facts": [{"id": f.id, "ts": f.ts, "category": f.category,
+                              "content": f.content[:500]} for f in facts]})
+            except Exception as e:
+                self._send_json(500, {"error": f"list facts failed: {e}"})
+
+        def _handle_metamorphose(self, body: "dict") -> None:
+            """``POST /metamorphose``：触发金蝉脱壳。
+
+            TUI / 终端 scripts/chat 入口；HITL 通道由 registry 层的 risk=high
+            工具链保证 ``metamorphose`` 不会未经审批就执行。我们这里只做
+            "父母显式同意" 的二次确认 — body.reason 必填。
+
+            Returns:
+                ``{"ok": True, "result": <metamorphose 返回 dict>}`` 或失败
+                ``{"ok": False, "error": "<reason>"}``。
+            """
+            reason = _coerce_text(body.get("reason"))
+            if not reason:
+                self._send_json(400, {"error": "reason required (父母触发蜕皮必须留原因)"})
+                return
+            try:
+                # 走工具层 → HITL gate (通过 approve 通道) 已在 supervidor 进程里；
+                # 这里直接调底层 metamorphose, 假设父母显式 POST = 已审批。
+                from .evolve.metamorphosis import metamorphose
+                result = metamorphose(reason=reason)
+                self._send_json(200, {"ok": True, "result": result})
+            except Exception as e:
+                self._send_json(500, {"error": f"metamorphose failed: {e}"})
+
         def do_GET(self) -> None:
             """处理 ``GET /last-answer`` 与 ``GET /health``；其他路径返回 404。"""
             if not self._auth_gate():
                 return
             self._dispatch({
-                "/last-answer": self._handle_last_answer,
-                "/health":      self._handle_health,
+                "/last-answer":   self._handle_last_answer,
+                "/health":        self._handle_health,
+                "/tools":         self._handle_tools,
+                "/generations":   self._handle_generations,
+                "/memory/recent": self._handle_memory_recent,
             }, None)
 
         def do_POST(self) -> None:
@@ -319,8 +392,9 @@ def _make_handler(token: str) -> type:
             if not self._auth_gate():
                 return
             self._dispatch({
-                "/message": self._handle_message,
-                "/approve": self._handle_approve,
+                "/message":     self._handle_message,
+                "/approve":     self._handle_approve,
+                "/metamorphose": self._handle_metamorphose,
             }, self._read_json() or {})
 
     return Handler

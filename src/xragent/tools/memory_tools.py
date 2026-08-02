@@ -262,3 +262,165 @@ def memory_recall_by_tag(
         d["tags"] = list(f.tags)  # 拷贝, 避免 LLM 拿到 manager 内部引用
         out.append(d)
     return {"ok": True, "count": len(facts), "facts": out}
+
+
+# ============ title 系列 wrapper helpers (5.6) ============
+# 两个 helper (／_parse_fact_id、／_validate_title) 是 ``memory_recall_by_title``
+# 和 ``memory_update_title`` 的前置门; LLM 工具调用层强约束:
+#   * fact_id 必须能 coerce 成正整数 (clip 后 ≥1) 才进 SQL
+#   * new_title 必须是合法字符串 (或 None 表示清空) 否则 ok=False
+# 单独抽出便于单元测试锁定边界 (test_memory_tools_title.py 验证).
+
+
+_FACT_ID_MIN: int = 1
+_FACT_ID_MAX: int = 10**18
+_TITLE_MAX_LEN: int = 200
+
+
+def _parse_fact_id(value: Any) -> int | None:
+    """把 LLM 传过来的 fact_id 安全地 coerce 成 ``[1, 10**18]`` 区间内 int。
+
+    与 :func:`_clip_limit` 行为对齐: 不可解析值一律 ``None`` (调用方 wrap 成
+    ``ok=False`` 错误回执), 不抛异常 — 避免 LLM 工具调用路径出现 500。
+
+    排除 ``bool`` ——  ``isinstance(True, int) is True`` (bool 是 int 子类),
+    但 LLM 传 ``True`` 当 fact_id 几乎总是 bug, 与 ``_clip_limit`` 语义一致。
+
+    Args:
+        value: 任意输入 (None / bool / str / int / float / 容器 / 对象)。
+
+    Returns:
+        int (clip 后落在 ``[_FACT_ID_MIN, _FACT_ID_MAX]``) 或 ``None`` (不可解析)。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    if n < _FACT_ID_MIN:
+        return _FACT_ID_MIN
+    if n > _FACT_ID_MAX:
+        return _FACT_ID_MAX
+    return n
+
+
+def _validate_title(value: Any) -> str | None:
+    """校验 ``new_title`` 参数合法性; 合法返回 ``None``, 非法返回错误文案。
+
+    错误文案刻意带"空白"/"字符串"/"200"这类关键字, 让 LLM 看到立刻知道
+    错在哪 (``test_validate_title_*`` 测试锁定文案)。
+
+    Args:
+        value: 任意输入。``None`` 是**非法**输入 (清空语义走 wrapper 层,
+            不是 validate 层的职责); 这里一律拒绝任何非 str。
+
+    Returns:
+        ``None`` 表示合法 (合法 str), 否则返回错误文案 (str)。
+        Wrapper (:func:`memory_update_title`) 在调本 helper 前先单独
+        处理 ``None`` (清空) 分支。
+    """
+    if not isinstance(value, str):
+        return "title 必须是字符串"
+    if not value.strip():
+        return "title 不能是空串或纯空白"
+    if len(value) > _TITLE_MAX_LEN:
+        return f"title 长度不能超过 {_TITLE_MAX_LEN}"
+    return None
+
+
+# ============ LLM-facing wrappers (5.6) ============
+
+
+def memory_recall_by_title(
+    title: Any = "",
+    k: int = 10,
+) -> dict[str, Any]:
+    """按 title 精确匹配召回 fact (newest first); 空 / 全空白 title 早返 ``[]``。
+
+    与 ``memory_recall_by_tag`` 同设计套路: 横向 (跨 category) + 后置本工具特有字段。
+    ``title="a"`` 不会召回 ``title="alpha"`` (与 LIKE 模糊区分) — 适合"我要找一条
+    已知 fact"的修复场景; 模糊召回应走 ``memory_recall`` (关键词 LIKE content)。
+
+    Args:
+        title: 精确等值的 title 字符串。``""`` / 纯空白 / ``None`` 一律早返 ``[]``
+            (不查 DB, 避免 LIKE '%%' 全表扫)。
+        k: 最多返回条数, 默认 10。LLM 传 0 / 负数会被夹到 1, 超过 1000
+            会被夹到 1000 (走 :func:`_clip_limit`, 与另外 3 个 recall 工具一致)。
+
+    Returns:
+        ``dict[str, Any]``:
+            * ``ok`` (bool): 始终 True
+            * ``count`` (int): 实际返回 fact 数
+            * ``facts`` (list[dict]): 每条 5 字段 (id/ts/category/content/title),
+              字段顺序锁定 — 测试 / LLM 契约强约束。
+    """
+    if not title or (isinstance(title, str) and not title.strip()):
+        return {"ok": True, "count": 0, "facts": []}
+    m = MemoryManager()
+    k_eff: int = _clip_limit(k, default=10, lo=_K_LIMIT_MIN, hi=_K_LIMIT_MAX)
+    facts = m.recall_by_title(title=str(title), k=k_eff)
+    out: list[dict[str, Any]] = []
+    for f in facts:
+        d = _fact_to_dict(f)
+        d["title"] = f.title
+        out.append(d)
+    return {"ok": True, "count": len(facts), "facts": out}
+
+
+def memory_update_title(
+    fact_id: Any,
+    new_title: Any = None,
+) -> dict[str, Any]:
+    """更新某条 fact 的 title; ``new_title=None`` 表示清空, 非法输入返回 ``ok=False``。
+
+    三层校验顺序:
+      1. ``_parse_fact_id`` 拒不可 coerce 值 (None / bool / 字符串 "abc" / 容器)
+      2. ``_validate_title`` 拒空 / 纯空白 / 非字符串 (>200) — ``None`` 是合法清空
+      3. ``MemoryManager.update_title`` 改 DB; rowcount=0 → ok=False "fact 不存在"
+
+    Args:
+        fact_id: 主键 id, 接受 int / 数字字符串 / float (走 :func:`_parse_fact_id` 强转)。
+        new_title: 新 title; ``None`` 清空, 字符串走 ``str.strip()`` 后写入。
+
+    Returns:
+        ``dict[str, Any]``:
+            成功: ``{"ok": True, "id": <int>, "new_title": <str|None>,
+                    "fact": {5 字段 Fact 快照}}``
+            失败: ``{"ok": False, "error": <str>``} (fact_id 非法 / 不存在 /
+                  title 非法 三类, error 文案锁定供 LLM 自检)。
+    """
+    parsed_id = _parse_fact_id(fact_id)
+    if parsed_id is None:
+        return {"ok": False, "error": f"fact_id 非法: {fact_id!r}"}
+    # ``None`` 是合法清空, 走 manager.update_title 分支 (列置 "");
+    # 其他非 str 不在这里兜底 (_validate_title 拒它), 因为 manager 的
+    # update_title 不接受非字符串 → 避免 dtype drift.
+    if new_title is not None:
+        title_err = _validate_title(new_title)
+        if title_err is not None:
+            return {"ok": False, "error": title_err}
+    new_title_eff: str | None = (
+        None if new_title is None else str(new_title).strip()
+    )
+    m = MemoryManager()
+    fact = m.update_title(parsed_id, new_title_eff)
+    if fact is None:
+        return {
+            "ok": False,
+            "error": f"fact 不存在 (id={parsed_id})",
+        }
+    # manager.update_title 把 None 收敛为空串 (NOT NULL DEFAULT '' 列),
+    # wrapper 返回值用 ``new_title_eff`` 反映用户传入语义, 而不是 DB 物理值.
+    return {
+        "ok": True,
+        "id": fact.id,
+        "new_title": new_title_eff,
+        "fact": {
+            "id": fact.id,
+            "ts": fact.ts,
+            "category": fact.category,
+            "content": fact.content,
+            "title": new_title_eff,
+        },
+    }

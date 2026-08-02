@@ -1,66 +1,206 @@
 #!/usr/bin/env python3
-"""和 XRAgent 对话的 REPL：readline → POST /message → poll /last-answer。
+"""XRAgent TUI — terminal conversation channel (HTTP-backed).
 
-前提：launchd 已拉起 supervisor + autonomous child，HTTP 跑在 $XRAGENT_HTTP_PORT（默认 11086）。
+前置条件: launchd 已拉起 supervisor + autonomous child, HTTP 在
+$XRAGENT_HTTP_PORT (默认 11086). 连不上时给友好提示.
+
+特性:
+  * readline 历史 (~/.xragent_chat_history)
+  * ANSI 色彩 (NO_COLOR=1 关掉, pipe 自动退化为无色)
+  * spinner + elapsed 等待
+  * 命令面板: /tools /gens /memory /meta /status /help /quit
 """
 import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.request
 
 PORT = int(os.environ.get("XRAGENT_HTTP_PORT", "11086"))
 HOST = os.environ.get("XRAGENT_HOST", "127.0.0.1")
-BASE = f"http://{HOST}:{PORT}"
+BASE = "http://" + HOST + ":" + str(PORT)
+HIST_FILE = os.path.expanduser("~/.xragent_chat_history")
+COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
 
-def _post(path: str, payload: dict, timeout: float = 5.0) -> dict:
+def _c(code, text):
+    if COLOR:
+        return "\033[" + code + "m" + text + "\033[0m"
+    return text
+
+
+def _post(path, payload, timeout=5.0):
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        f"{BASE}{path}", data=data,
+        BASE + path, data=data,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8") or "{}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "error": "HTTP " + str(e.code) + ": " + e.reason}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
-def _get(path: str, timeout: float = 5.0) -> dict:
-    with urllib.request.urlopen(f"{BASE}{path}", timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8") or "{}")
+def _get(path, timeout=5.0):
+    try:
+        with urllib.request.urlopen(BASE + path, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "error": "HTTP " + str(e.code) + ": " + e.reason}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
-def _post_text(text: str) -> dict:
+def _post_text(text):
     return _post("/message", {"text": text})
 
 
-def _get_last_answer(prev_ts: float, timeout: float = 120.0) -> dict:
-    """轮询 /last-answer 直到 ts 变化（说明 Agent 跑了这条）。"""
+def _poll_answer(prev_ts, timeout=180.0):
     t0 = time.time()
+    last_spin = 0.0
+    spin_idx = 0
     while time.time() - t0 < timeout:
         ans = _get("/last-answer")
-        if ans.get("ts", 0) > prev_ts and ans.get("answer"):
+        ts = ans.get("ts", 0)
+        if ts > prev_ts and ans.get("answer"):
+            sys.stdout.write("\r" + " " * 60 + "\r")
+            sys.stdout.flush()
             return ans
-        time.sleep(1.5)
-    return {"answer": "(timeout)", "ts": 0.0}
+        now = time.time()
+        if now - last_spin > 0.15:
+            elapsed = int(now - t0)
+            spinner = SPINNER[spin_idx % len(SPINNER)]
+            line = "\r " + _c("36", spinner) + " " + _c("90", "thinking... " + str(elapsed) + "s ")
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            last_spin = now
+            spin_idx += 1
+        time.sleep(0.4)
+    sys.stdout.write("\r" + " " * 60 + "\r")
+    sys.stdout.flush()
+    return {"answer": "(timeout)", "ts": prev_ts}
 
 
-def main() -> int:
-    # health check
+def _banner(h):
+    pid = h.get("pid", "?")
+    rc = h.get("restart_count", 0)
+    pending = h.get("metamorphosis_pending", False)
+    line = _c("1;36", "═══ XRAgent TUI ═══") + "  pid=" + _c("33", str(pid))
+    line += "  restart=" + _c("33", str(rc))
+    line += "  meta-pending=" + (_c("31", "yes") if pending else _c("32", "no"))
+    print(line)
+    print(_c("90", "Type /help for commands. /quit to exit."))
+
+
+def _help():
+    print(_c("1;33", "Commands:"))
+    cmds = [
+        ("/help",       "show this help"),
+        ("/tools",      "list available tools (low/medium/high risk)"),
+        ("/memory",     "show recent facts from long-term memory"),
+        ("/gens",       "show recent metamorphosis generations"),
+        ("/status",     "show current health"),
+        ("/meta <why>", "trigger self-replace (金蝉脱壳) with reason"),
+        ("/quit",       "exit the TUI"),
+    ]
+    for k, v in cmds:
+        print("  " + _c("36", k.ljust(20)) + "  " + v)
+
+
+def _cmd_tools():
+    r = _get("/tools")
+    if not r.get("ok"):
+        print(_c("31", "Error: " + str(r.get("error"))))
+        return
+    print(_c("1;33", "Tools (" + str(r["count"]) + "):"))
+    for t in r["tools"]:
+        risk = t["risk"]
+        rc = "32" if risk == "low" else ("33" if risk == "medium" else "31")
+        print("  [" + _c(rc, risk.rjust(11)) + "]  " + t["name"])
+
+
+def _cmd_memory():
+    r = _get("/memory/recent?n=10")
+    if not r.get("ok"):
+        print(_c("31", "Error: " + str(r.get("error"))))
+        return
+    if r.get("count", 0) == 0:
+        print(_c("90", "(no facts yet)"))
+        return
+    for f in r.get("facts", []):
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(f["ts"]))
+        cat = _c("36", f["category"].ljust(12))
+        print("  " + _c("33", str(f["id"]).rjust(4)) + " " + _c("90", ts) + " " + cat + "  " + f["content"][:80])
+
+
+def _cmd_gens():
+    r = _get("/generations")
+    if not r.get("ok"):
+        print(_c("31", "Error: " + str(r.get("error"))))
+        return
+    if r.get("count", 0) == 0:
+        print(_c("90", "(no generations yet)"))
+        return
+    for g in r.get("generations", []):
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(g.get("ts", 0)))
+        reason = (g.get("reason", "?") or "?")[:80]
+        print("  " + _c("33", ts) + "  " + reason)
+
+
+def _cmd_status():
+    h = _get("/health")
+    print(_c("1;33", "Health:"))
+    print(json.dumps(h, ensure_ascii=False, indent=2))
+
+
+def _cmd_meta(reason):
+    if not reason:
+        print(_c("31", "usage: /meta <reason>"))
+        return
+    print(_c("33", "→ metamorphose(" + repr(reason) + ") ..."))
+    r = _post("/metamorphose", {"reason": reason}, timeout=60.0)
+    if not r.get("ok"):
+        print(_c("31", "Failed: " + str(r.get("error"))))
+        return
+    res = r.get("result", {})
+    print(_c("32", "✓ metamorphose done"))
+    print("  ok         = " + str(res.get("ok")))
+    print("  pushed     = " + str(res.get("pushed")))
+    print("  compile_ok = " + str(res.get("compile_ok", res.get("ok"))))
+
+
+def _setup_readline():
+    try:
+        import readline  # noqa: F401
+        import atexit
+        if os.path.exists(HIST_FILE):
+            readline.read_history_file(HIST_FILE)
+        readline.set_history_length(500)
+        readline.parse_and_bind("tab: complete")
+        atexit.register(readline.write_history_file, HIST_FILE)
+    except Exception:
+        pass
+
+
+def main():
+    _setup_readline()
     try:
         h = _get("/health")
     except Exception as e:
-        print(f"无法连 {BASE}/health: {e}", file=sys.stderr)
+        print(_c("31", "无法连 " + BASE + "/health: " + str(e)), file=sys.stderr)
         print("是不是 launchd 没起？跑 `scripts/manage launchd-start`", file=sys.stderr)
         return 1
-    print(f"=== XRAgent chat ===  PID={h.get('pid')}  restarts={h.get('restart_count')}")
-    print(f"POST 你的消息，回车后等 Agent 回复（最长 120s）")
-    print("输入 /quit 退出，/status 看心跳\n")
-
-    prev_ts = 0.0
+    _banner(h)
+    prev_ts = h.get("heartbeat_ts", 0.0)
     while True:
         try:
-            line = input("you> ").strip()
+            line = input(_c("1;32", "you> ")).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
@@ -68,29 +208,41 @@ def main() -> int:
             continue
         if line in ("/quit", "/exit"):
             return 0
-        if line == "/status":
-            print(json.dumps(_get("/health"), ensure_ascii=False, indent=2))
+        if line == "/help":
+            _help()
             continue
-        if line == "/last":
-            print(json.dumps(_get("/last-answer"), ensure_ascii=False, indent=2))
+        if line == "/tools":
+            _cmd_tools()
+            continue
+        if line == "/memory":
+            _cmd_memory()
+            continue
+        if line == "/gens":
+            _cmd_gens()
+            continue
+        if line == "/status":
+            _cmd_status()
+            continue
+        if line.startswith("/meta"):
+            _cmd_meta(line[5:].strip())
             continue
         try:
             r = _post_text(line)
         except Exception as e:
-            print(f"POST 失败: {e}", file=sys.stderr)
+            print(_c("31", "POST failed: " + str(e)), file=sys.stderr)
             continue
         if not r.get("ok"):
-            print(f"Agent 拒绝: {r}", file=sys.stderr)
+            print(_c("31", "Agent 拒: " + str(r)), file=sys.stderr)
             continue
-        # 等回复
-        print("(等 Agent...)")
-        ans = _get_last_answer(prev_ts)
+        ans = _poll_answer(prev_ts)
         prev_ts = ans.get("ts", prev_ts)
         text = ans.get("answer", "")
         if text:
-            print(f"xr> {text}\n")
+            print(_c("1;35", "xr> ") + text)
+            print()
         else:
-            print("(无回复)\n")
+            print(_c("90", "(无回复)"))
+            print()
     return 0
 
 

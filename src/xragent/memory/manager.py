@@ -118,6 +118,99 @@ class MemoryManager:
         self._init_schema()
         self._migrate_all()
 
+    def recall_by_tag(self, tag: str, k: int = 10) -> list[Fact]:
+        """5.4 新方法: 按 tag 跨 category 横向召回 fact (newest first)。
+
+        查询模式: WHERE tags LIKE '%"tag"%'
+          - JSON 数组里每个元素都有引号包裹, 精确匹配 "python" 不会误匹配
+            "pythonic" 或 "cpython"。
+          - 走 idx_facts_tags 索引 (B-tree on TEXT, LIKE 后缀为常量时 SQLite
+            走索引优化路径)。
+          - 顺序按 ts DESC, LIMIT 提前结束。
+
+        Args:
+            tag: 单个 tag, 不含引号 (内部加引号)。
+            k: 返回条数上限, 默认 10。
+
+        Returns:
+            按 ts DESC 排序的 Fact 列表。空 tag 返回 ``[]`` (避免 LIKE '%%' 全表扫)。
+        """
+        if not tag:
+            return []
+        sql = (
+            "SELECT * FROM facts WHERE tags LIKE ? "
+            "ORDER BY ts DESC LIMIT ?"
+        )
+        rows = self._conn.execute(sql, (f'%"{tag}"%', k)).fetchall()
+        return [self._row_to_fact(r) for r in rows]
+
+    def recent(self, n: int = 20) -> list[Fact]:
+        """最新 N 条 fact (含已归档), 按 ts DESC。
+
+        与 ``recall_active(n)`` 区别: 本方法不过滤 archived, 用于调试 /
+        复盘类场景; UI / LLM-facing wrapper 通常用 ``recall_active``。
+
+        Args:
+            n: 返回条数上限, 默认 20。
+
+        Returns:
+            按 ts DESC 排序的 Fact 列表 (最多 n 条)。
+        """
+        sql = "SELECT * FROM facts ORDER BY ts DESC LIMIT ?"
+        rows = self._conn.execute(sql, (n,)).fetchall()
+        return [self._row_to_fact(r) for r in rows]
+
+    def recall_by_title(self, title: str, k: int = 10) -> list[Fact]:
+        """5.6 新方法: 按 title 精确匹配召回 (走 idx_facts_title)。
+
+        与 :meth:`recall_by_tag` 互补 —— tag 走模糊 LIKE, title 走 ``=`` 精确。
+        title 稀疏 (大量 row title=''), NULL / 空 string 都不入 B-tree 索引。
+
+        Args:
+            title: 精确等值的 title 字符串。
+            k: 返回条数上限, 默认 10。
+
+        Returns:
+            按 ts DESC 排序的 Fact 列表。空 title 返回 ``[]``。
+        """
+        if not title:
+            return []
+        sql = (
+            "SELECT * FROM facts WHERE title = ? "
+            "ORDER BY ts DESC LIMIT ?"
+        )
+        rows = self._conn.execute(sql, (title, k)).fetchall()
+        return [self._row_to_fact(r) for r in rows]
+
+    def update_title(self, fact_id: int, new_title: Optional[str] = None) -> Optional[Fact]:
+        """5.6 新方法: 更新 title 并返回更新后的 Fact, ``None`` = id 不存在。
+
+        返回类型 ``Optional[Fact]`` 区分两种失败:
+          * rowcount=0 → ``None`` (id 不存在)
+          * 写后再 SELECT 取不到 row → ``None`` (防御, 实际不应发生)
+
+        Args:
+            fact_id: 主键 id。
+            new_title: 新 title; ``None`` 表示"清空" (列置 ``""``, 因为
+                title 列是 ``NOT NULL DEFAULT ''``; wrapper 把"清空"语义
+                在 LLM-facing 层表达成 ``None``, DB 层收口为 ``""``)。
+
+        Returns:
+            更新后的 :class:`Fact`; id 不存在时 ``None``。
+        """
+        title_eff = "" if new_title is None else new_title
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "UPDATE facts SET title = ? WHERE id = ?",
+                (title_eff, fact_id),
+            )
+            if cur.rowcount == 0:
+                return None
+            row = self._conn.execute(
+                "SELECT * FROM facts WHERE id = ?", (fact_id,)
+            ).fetchone()
+        return self._row_to_fact(row) if row else None
+
     def close(self) -> None:
         """关闭底层 SQLite 连接, 释放 file handle。
 
@@ -147,10 +240,12 @@ class MemoryManager:
         """依次执行 _migrate_v5X, 幂等。"""
         self._migrate_v51()
         self._migrate_v53()
+        self._migrate_v54()  # 5.4: idx_facts_tags
         self._migrate_v55()
-        self._migrate_v56()
+        self._migrate_v56()  # 5.6: idx_facts_title
         self._migrate_v57()
         self._migrate_v58()
+        self._migrate_v59()  # 5.9: 恢复 5.4/5.6 时代丢失的索引
 
     # ---- 5.1 ----
     def _migrate_v51(self) -> None:
@@ -180,6 +275,14 @@ class MemoryManager:
                 "CREATE INDEX IF NOT EXISTS idx_facts_category_priority_ts "
                 "ON facts(category, priority DESC, ts DESC)"
             )
+
+    # ---- 5.4 ----
+    def _migrate_v54(self) -> None:
+        """5.3 -> 5.4: +idx_facts_tags (B-tree on tags JSON 字段, 配合 LIKE '"tag"' 后缀优化).
+
+        表结构没变, 只加索引. 老库已存在则 CREATE INDEX IF NOT EXISTS 跳过.
+        5.7 重构 (-456 行) 时忘了重建, _migrate_v59 也会兜底再补一次."""
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_tags ON facts(tags)")
 
     # ---- 5.5 ----
     def _migrate_v55(self) -> None:
@@ -249,6 +352,26 @@ class MemoryManager:
                 "ON facts(last_accessed_ts ASC)"
             )
 
+    def _migrate_v59(self) -> None:
+        """5.8 -> 5.9: 恢复 5.4/5.6 时代丢失的 idx_facts_tags / idx_facts_title 两个索引。
+
+        仅 DDL, 不动 data; 老库已存在则 CREATE INDEX IF NOT EXISTS 直接跳过。
+        之前 query 走全表扫描也能跑 (数据量小), 但跨 turn 的 cumulative fact 量起来
+        后 LIKE '"tag"' 性能塌方。这里补索引只让路径变窄, 不修改任何 row。
+
+        现状对账:
+          * idx_facts_tags  (5.4) — 5.7 大重构 (-456 行) 时随 method recall_by_tag
+            一并遗失。
+          * idx_facts_title (5.6) — 5.7 重构时随 method recall_by_title / update_title
+            一并遗失。
+
+        修复策略: 幂等 CREATE INDEX IF NOT EXISTS, 跑完一遍后下次启动 _migrate_all
+        会自动 skip (PRAGMA user_version 已经 +1)。
+        """
+        with self._lock, self._conn:
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_tags ON facts(tags)")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_title ON facts(title)")
+
     # ---- CRUD ----
 
     def save_fact(
@@ -266,7 +389,10 @@ class MemoryManager:
         import json as _json
 
         ts = time.time()
-        tags_json = _json.dumps(list(tags or []))
+        tags_json = _json.dumps(list(tags or []), ensure_ascii=False)
+        # title 列 NOT NULL DEFAULT '', 输入 None 时收敛成空串
+        # (老 schema 已经是 NOT NULL, 不在 save_fact 抛 IntegrityError)
+        title_eff = title if title is not None else ""
         # clamp confidence 到 [0, 1]
         conf = max(0.0, min(1.0, float(confidence)))
         # 5.8: 新行 last_accessed_ts 初始化为 ts (创建即"访问"),避免新建行被
@@ -285,7 +411,7 @@ class MemoryManager:
                     source_turn_idx,
                     tags_json,
                     priority,
-                    title,
+                    title_eff,
                     conf,
                     last_access,
                 ),
@@ -301,7 +427,7 @@ class MemoryManager:
             priority=priority,
             tags=list(tags or []),
             archived=False,
-            title=title,
+            title=title_eff,
             confidence=conf,
             last_accessed_ts=last_access,
         )
@@ -449,18 +575,28 @@ class MemoryManager:
         return [self._row_to_fact(r) for r in rows]
 
     def archive_fact(self, fact_id: int) -> bool:
-        """5.5: 归档事实 (archived=1); 不存在则返回 False."""
+        """5.5: 软删除 — 标 archived=1; 已 archived 返回 False (幂等).
+
+        与 :meth:`unarchive_fact` 对称: 用 status filter 避免"重置同样值"
+        算 rowcount=1 而非 idempotent。
+        """
         with self._lock, self._conn:
             cur = self._conn.execute(
-                "UPDATE facts SET archived = 1 WHERE id = ?", (fact_id,)
+                "UPDATE facts SET archived = 1 WHERE id = ? AND archived = 0",
+                (fact_id,),
             )
             return cur.rowcount > 0
 
     def unarchive_fact(self, fact_id: int) -> bool:
-        """5.5: 取消归档 (archived=0)."""
+        """5.5: 取消归档 (archived=0); 幂等 — 已 archived=0 时返回 False.
+
+        与 :meth:`archive_fact` 对称: 都加 status filter, 避免"重置同样值"
+        仍算 rowcount=1 而非 idempotent。
+        """
         with self._lock, self._conn:
             cur = self._conn.execute(
-                "UPDATE facts SET archived = 0 WHERE id = ?", (fact_id,)
+                "UPDATE facts SET archived = 0 WHERE id = ? AND archived = 1",
+                (fact_id,),
             )
             return cur.rowcount > 0
 
@@ -493,28 +629,58 @@ class MemoryManager:
             ).fetchone()
         return int(r["c"])
 
-    def update_confidence(self, fact_id: int, confidence: float) -> bool:
-        """5.7: 更新某条 fact 的 confidence (clamp 到 [0,1]); 不存在返回 False."""
+    def update_confidence(self, fact_id: int, confidence: float) -> Optional[Fact]:
+        """5.7: 更新某条 fact 的 confidence (clamp 到 [0,1]), 返回更新后 Fact.
+
+        与 5.6 update_title 返回类型对齐 —— 都是"UPDATE + SELECT 回读完整 Fact"。
+        调用方拿到的快照避免二次 recall 开销。
+
+        Args:
+            fact_id: 主键 id。
+            confidence: 0.0~1.0 之间的浮点; 越界自动 clamp。
+
+        Returns:
+            更新后的 :class:`Fact`; id 不存在时 ``None``。
+        """
         conf = max(0.0, min(1.0, float(confidence)))
         with self._lock, self._conn:
             cur = self._conn.execute(
                 "UPDATE facts SET confidence = ? WHERE id = ?",
                 (conf, fact_id),
             )
-            return cur.rowcount > 0
+            if cur.rowcount == 0:
+                return None
+            row = self._conn.execute(
+                "SELECT * FROM facts WHERE id = ?", (fact_id,)
+            ).fetchone()
+        return self._row_to_fact(row) if row else None
 
     def recall_by_min_confidence(
         self,
         min_confidence: float = 0.5,
         category: Optional[str] = None,
         k: int = 100,
+        include_archived: bool = False,
     ) -> list[Fact]:
-        """5.7: 按最低 confidence 阈值召回 (idx_facts_confidence_ts)."""
+        """5.7: 按最低 confidence 阈值召回 (idx_facts_confidence_ts).
+
+        Args:
+            min_confidence: 下限阈值 (含); 默认 0.5。
+            category: 按分类过滤; ``None`` 表示跨类。
+            k: 返回条数上限, 默认 100。
+            include_archived: True 含已归档行 (运维 / debug 用);
+                默认 False (LLM-facing recall 与 recall_active 行为对齐)。
+
+        Returns:
+            按 confidence DESC, ts DESC 排序的 Fact 列表。
+        """
         sql = "SELECT * FROM facts WHERE confidence >= ?"
         params: list = [float(min_confidence)]
         if category:
             sql += " AND category = ?"
             params.append(category)
+        if not include_archived:
+            sql += " AND archived = 0"
         sql += " ORDER BY confidence DESC, ts DESC LIMIT ?"
         params.append(k)
         with self._lock:

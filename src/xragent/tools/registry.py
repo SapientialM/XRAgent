@@ -283,6 +283,18 @@ def build_default_registry() -> ToolRegistry:
             "k": {"type": "integer", "default": 10, "description": "最多返回条数; clip 到 [1, 1000]"},
         }, "required": ["tag"]},
         "low", memory_tools.memory_recall_by_tag)
+    add("memory_recall_by_title", "按 title 精确匹配召回 fact (newest first); title 空/纯空白早返空。",
+        {"type": "object", "properties": {
+            "title": {"type": "string", "description": "精确等值的 title 字符串; 空/纯空白早返空"},
+            "k": {"type": "integer", "default": 10, "description": "最多返回条数; clip 到 [1, 1000]"},
+        }, "required": ["title"]},
+        "low", memory_tools.memory_recall_by_title)
+    add("memory_update_title", "更新某条 fact 的 title; new_title=None 表示清空, 非法输入返回 ok=False。",
+        {"type": "object", "properties": {
+            "fact_id": {"type": "integer", "description": "主键 id; 接受 int / 数字字符串 / float"},
+            "new_title": {"type": ["string", "null"], "description": "新 title; None 清空, 空串/超 200 字符返回 ok=False"},
+        }, "required": ["fact_id", "new_title"]},
+        "low", memory_tools.memory_update_title)
     add("diary_write", "向 diary/YYYY-MM-DD.md 追加一段（人类可读）。",
         {"type": "object", "properties": {"title": {"type": "string"}, "body": {"type": "string"}}, "required": ["title", "body"]},
         "low", diary_tools.diary_write)
