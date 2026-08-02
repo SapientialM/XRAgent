@@ -26,10 +26,17 @@ N 天的 ``xragent/turn-*`` tag。但当 Agent 在短窗口内高频 snapshot
 - ``dry_run=True`` 时仅列候选，不实际 ``git tag -d``
 - 单 tag 删除失败不阻塞其他 tag（与 ``cleanup_old_snapshots`` 对齐）
 - 返回列表按 **creatordate 旧→新** 排序，与 ``cleanup_old_snapshots`` 一致
+
+**v0.5.8 refactor (本轮)**: 把原本 inline 的 ``git for-each-ref`` 调用 + 行解析 +
+逐条 ``git tag -d`` 循环全部走 :mod:`._tag_index` 的 helper（``list_xragent_turn_tags``
+/ ``parse_xragent_turn_tags`` / ``delete_tags`），去重与时间清理路径的 3 段相同逻辑。
+行格式 ``%09`` / ``\\t`` 改一处时也不再有漂移风险。
 """
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
+from ._tag_index import delete_tags, list_xragent_turn_tags
 
 if TYPE_CHECKING:
     from .side_git import SideGit
@@ -61,54 +68,23 @@ def cleanup_old_snapshots_by_count(
         ``dry_run=False`` 时对每个候选 tag 执行 ``git tag -d``；单条失败
         不阻塞其他 tag。
     """
-    # 早返：禁用 / 非 repo —— 与 cleanup_old_snapshots 早返语义对齐
+    # 早返：禁用 —— 与 cleanup_old_snapshots 早返语义对齐
     if max_count <= 0:
         return []
-    if not side_git.is_repo():
+    # 非 repo 守卫 / for-each-ref 失败 → 静默 [] 由 list_xragent_turn_tags 内部处理
+    rows = list_xragent_turn_tags(side_git)  # 升序：旧 → 新
+    # 升序 rows 的语义直接用负索引:
+    # - rows[-max_count:] = 保留段（最新 N 个，旧→新方向）
+    # - rows[:-max_count] = 删除段（最旧的），已经是旧→新顺序返回
+    if len(rows) <= max_count:
         return []
+    targets = [name for _, name in rows[:-max_count]]
 
-    # 一次性取 creatordate:unix + refname。SideGit._run 失败（无匹配 ref）
-    # 仍会抛 RuntimeError（git exit 1），这里静默吞下 → 当作"无 tag"。
-    try:
-        out = side_git._run(  # noqa: SLF001 — 复用 SideGit._run，与 cleanup_old_snapshots 同语义
-            "for-each-ref",
-            "refs/tags/xragent/turn-*",
-            "--format=%(refname:short)%09%(creatordate:unix)",
-        )
-    except RuntimeError:
-        return []
-
-    rows: list[tuple[int, str]] = []
-    for line in out.splitlines():
-        if "\t" not in line:
-            continue
-        name, ts_str = line.split("\t", 1)
-        try:
-            ts = int(ts_str)
-        except ValueError:
-            continue
-        rows.append((ts, name))
-
-    # 倒序：新→旧。
-    # - rows[:max_count] = 保留段（最新 N 个）
-    # - rows[max_count:] = 删除段（新→旧方向的最后 N 段，即旧→新方向
-    #   的前 N 段）→ 取 reversed 得"旧→新"顺序返回
-    rows.sort(reverse=True)
-    targets = [name for _, name in rows[max_count:]]
-    targets.reverse()  # 新→旧 → 旧→新（与 cleanup_old_snapshots 返回顺序对齐）
-
-    if dry_run or not targets:
+    if dry_run:
         return targets
 
-    removed: list[str] = []
-    for name in targets:
-        try:
-            side_git._run("tag", "-d", name)  # noqa: SLF001
-            removed.append(name)
-        except RuntimeError:
-            # 单 tag 删失败不阻塞其他 tag —— 与 cleanup_old_snapshots 对齐
-            pass
-    return removed
+    # 走 _tag_index.delete_tags：单条失败不阻塞整体，与 cleanup_old_snapshots 对齐
+    return delete_tags(side_git, targets)
 
 
 __all__ = ["cleanup_old_snapshots_by_count"]
