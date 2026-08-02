@@ -90,7 +90,31 @@ class MemoryManager:
     ]
 
     @staticmethod
-    def _safe_create_index(conn, ddl):
+    def _safe_create_index(conn: sqlite3.Connection, ddl: str) -> bool:
+        """幂等执行 ``CREATE INDEX IF NOT EXISTS`` 并吞掉"列/表未就绪"异常。
+
+        Migration 阶段调用此 helper 而不是裸 ``conn.execute(ddl)``, 因为:
+          * 老库 schema 版本不齐, 索引可能引用尚未 ``ALTER TABLE`` 加上的列
+            (``no such column: ...``);
+          * ``_migrate_v59`` 等"补索引"步骤在某些老库上表本身可能缺失
+            (``no such table: ...``)。
+        这两类异常视为"幂等跳过", 返回 ``False``; 其它异常 (如 SQL 语法错)
+        继续往上抛, 让调用方立刻感知。
+
+        Args:
+            conn: 已打开的 SQLite 连接; 本方法不消费结果集, ``row_factory``
+                不影响行为。
+            ddl: 单条 ``CREATE INDEX IF NOT EXISTS ...`` SQL 语句, 必须为
+                ``str``; 非 str 会原样下传, 由 SQLite 层抛错。
+
+        Returns:
+            bool: 索引成功创建或已存在 → ``True``; 列/表缺失导致失败 → ``False``
+            (幂等跳过)。
+
+        Raises:
+            sqlite3.Error: 上述两类"已知可跳过"以外的异常 (如语法错误、权限
+                问题、磁盘满); 透传给调用方, 不在本 helper 静默吞掉。
+        """
         try:
             conn.execute(ddl)
             return True
