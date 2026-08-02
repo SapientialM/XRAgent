@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -64,15 +65,29 @@ class TraceRecorder:
         return path
 
 
+def _split_ts(t: float) -> tuple[str, int]:
+    """从同一个 epoch 秒 ``t`` 同时派生日期前缀和毫秒后缀。
+
+    把"取 localtime + strftime"和"取毫秒"绑成一次 ``t`` 派生,避免
+    跨秒边界（T.sss=999 → T+1.001）下前后两段对不上。返回
+    ``(prefix, ms)`` 元组,prefix 形如 ``"YYYYMMDD-HHMMSS"``,ms
+    为 ``0..999`` 的整数。
+    """
+    local = time.localtime(t)
+    prefix = time.strftime("%Y%m%d-%H%M%S", local)
+    ms = int(t * 1000) % 1000
+    return prefix, ms
+
+
 def _format_turn_id(t: float) -> str:
     """按 ``YYYYMMDD-HHMMSS-mmm`` 格式把单次 ``time.time()`` 派生的时间戳拼成 turn id。
 
-    把 strftime 前缀 + ms 后缀压成一处,既保证 race fix（前后两段来自同一 ``t``,
-    跨秒边界不会错位）也让格式化逻辑独立于边界校验,便于单测直接调它验证格式
-    稳定性,无需走 :func:`new_turn_id` 的 ``now < 0`` 校验。
+    把前缀 + ms 后缀压成一处（:func:`_split_ts`）,既保证 race fix（前后
+    两段来自同一 ``t``,跨秒边界不会错位）也让格式化逻辑独立于边界校验,
+    便于单测直接调它验证格式稳定性,无需走 :func:`new_turn_id` 的
+    ``now < 0`` / ``now`` 非有限数校验。
     """
-    prefix = time.strftime("%Y%m%d-%H%M%S", time.localtime(t))
-    ms = int(t * 1000) % 1000
+    prefix, ms = _split_ts(t)
     return f"{prefix}-{ms:03d}"
 
 
@@ -81,18 +96,23 @@ def new_turn_id(now: float | None = None) -> str:
 
     Args:
         now: 可选 epoch 秒,用于测试时注入固定时间。必须为非负数
-            (epoch 自 1970-01-01 起算;负值会得到 1969 日期,无意义)。
-            ``None`` 表示用 ``time.time()`` 当前值。
+            (epoch 自 1970-01-01 起算;负值会得到 1969 日期,无意义)
+            且为有限数（拒绝 ``NaN`` / ``inf``,静默接受会产生乱码 ID
+            如 ``"NaN-NaN-NaN"``）。``None`` 表示用 ``time.time()`` 当前值。
 
     Returns:
         时间格式字符串 ID,例如 ``"20260125-143022-123"``。秒以下
         部分用 ``int(t*1000) % 1000`` 取毫秒,确保同秒多次调用能区分。
 
     Raises:
-        ValueError: ``now`` 不为 ``None`` 且 < 0（边界条件：epoch
-            秒不可能为负;早 fail 比静默产生 1969 日期更安全）。
+        ValueError: ``now`` 不为 ``None`` 且 < 0,或 ``now`` 是
+            ``NaN`` / ``inf``（边界条件：epoch 秒既不可能为负也不
+            可能非有限;早 fail 比静默产生乱码 ID 更安全）。
     """
-    if now is not None and now < 0:
-        raise ValueError(f"now must be non-negative epoch seconds, got {now}")
+    if now is not None:
+        if not math.isfinite(now):
+            raise ValueError(f"now must be finite epoch seconds, got {now}")
+        if now < 0:
+            raise ValueError(f"now must be non-negative epoch seconds, got {now}")
     t = now if now is not None else time.time()
     return _format_turn_id(t)
