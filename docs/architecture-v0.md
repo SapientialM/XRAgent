@@ -13,6 +13,8 @@
 > [ADR-0011](adr/0011-architecture-v0-registry-internals-tracked-files-and-autonomous-window-s.md)（v0.2.10 + v0.2.11 重做：registry 内部结构展开 + manager.py.bak / __tools_probe__.txt 留痕 + autonomous.next_task window_s + hook.py import 整理；前次 commit 4f970a4d 被 revert）。
 > [ADR-0012](adr/0012-architecture-v0-doc-sync-tool-count-and-scoring.md)（v0.3.1：工具面 17 → 19 + §三表补 2 行 + §四剩 17 + §二 memory_tools 7 个 + §三表底 5 种 recall + §二模块清单 scoring/ 占位登记；commit `032d78f5`）。
 > [ADR-0013](adr/0013-architecture-v0-v0.3.1-doc-landing-and-manager-py-bak-removal.md)（v0.3.1 doc sync 落地：应用 ADR-0012 所有 D1-D7 + manager.py.bak 删除回溯 D8）。
+> [ADR-0014](adr/0014-architecture-v0-schema-5.9-and-stale-line-counts.md)（v0.5：schema 5.9 整理 doc sync 设计——§一 5.8→5.9 + §二行数 305→317 + §五 v0.5 行 + 顶部 ADR 清单）。
+> [ADR-0015](adr/0015-architecture-v0-landing-adr-0014-d1-d4.md)（v0.5：实际落地 ADR-0014 D1-D4——commit `f3d60758` 只新增了 ADR 文件，architecture-v0.md 的 4 处 drift（D1/D2/D4/D5）实际由本 ADR-0015 commit 修复；D3 §二 memory/manager.py 行注释一并按 D1 精神同步）。
 
 ## 一、五大核心
 
@@ -21,7 +23,7 @@
 | 梦想 | `AGENTS.md` + `core/dream.py` + `core/react_loop.py`（ReAct 主循环）+ `core/backend.py`（LLM 适配） |
 | 父母 | `hitl/gate.py` + `http_server.py` |
 | 生活 | `tools/blacklist.py`（仓库根路径围栏 + 黑名单） |
-| 记忆 | `memory/manager.py` + `core/turn.py` + `snapshot/side_git.py`（v0.2+ 含 cleanup 入口，见 ADR-0003）<br>`memory/manager.py` 当前 schema **5.8**（5.0 基线 + 5.1 `source_turn_idx` + 5.3 `priority` + 5.5 `archived` + 5.6 `title` + 5.7 `confidence` + 5.8 `last_accessed_ts` LRU），基线见 ADR-0004，5.8 LRU 增量见 ADR-0008 |
+| 记忆 | `memory/manager.py` + `core/turn.py` + `snapshot/side_git.py`（v0.2+ 含 cleanup 入口，见 ADR-0003）<br>`memory/manager.py` 当前有效 schema **5.9**（5.0 基线 + 5.1 `source_turn_idx` + 5.3 `priority` + 5.4 `idx_facts_tags`（v0.5 5.9 二次回填）+ 5.5 `archived` + 5.6 `title` + 5.7 `confidence` + 5.8 `last_accessed_ts` LRU + 5.9 `idx_facts_title` 重建 + 5.4 `idx_facts_tags` 重建），基线见 ADR-0004，5.8 LRU 增量见 ADR-0008，5.9 索引回填见 ADR-0014<br>注：常量 `SCHEMA_VERSION = 58` 未 bump 是已知遗留（5.9 migration 是 DDL-only 的二次回填，不改字段），有效口径以 `_migrate_all()` 实际跑到的最后一个版本为准 |
 | 成长 | `evolve/metamorphosis.py` + `evolve/generations.py` + `autonomous.py`（自驱动循环）<br>+ `watchdog/supervisor.py`（子进程异常自愈）+ `watchdog/runtime_state.py`（心跳文件，见 ADR-0005/0006） |
 
 补充说明：
@@ -68,7 +70,8 @@ src/xragent/
 ├── core/turn.py               # TurnRecord + TraceRecorder
 ├── core/react_loop.py         # ReAct 主循环（含 compress_if_needed 调用）
 ├── memory/manager.py          # MemoryManager：SQLite 长期事实 + compress_if_needed 封装
-│                             # 当前 schema 5.8（v0.2.7），见 ADR-0004 + ADR-0008
+│                             # 当前有效 schema 5.9（v0.2.7 +LRU 5.8；v0.5 5.9 二次回填 5.4/5.6 丢失的
+│                             # idx_facts_tags / idx_facts_title + 配套 recent() method），见 ADR-0004 / ADR-0008 / ADR-0014
 ├── compression/simple.py      # 最简压缩（SimpleCompression.compress）
 ├── compression/hook.py        # 压缩策略注册表（已注册 simple）；v0.2.10 import 整理
 │                             # （顶部 import + 无 noqa；见 ADR-0011 D5）
@@ -88,7 +91,7 @@ src/xragent/
 │                             # 内部：_parse_stdin_line 纯函数 + _DEFAULT_POLICIES dict（v0.2.9，见 ADR-0010）
 ├── http_server.py             # HTTP 父通道（补全 HIL 通道，见 ADR-0001 D2）
 ├── tools/registry.py          # build_default_registry() + 完整 ToolRegistry 注册中心
-│                             # （v0.2.10 抽出 _safe_call helper，305 行，结构展开）：
+│                             # （v0.2.10 抽出 _safe_call helper，317 行，结构展开）：
 │                             #   - ToolDef dataclass（name/description/input_schema/risk/handler）
 │                             #   - ToolRegistry class 六方法：register / unregister / get / names / specs / run
 │                             #   - 5 module-level helper：
@@ -199,4 +202,4 @@ src/xragent/
 | v0.2.10 | 架构 doc 同步：tools/registry.py 内部结构展开（ToolDef dataclass + ToolRegistry 6 方法 + 5 module-level helper：_HitlRejected / _HitlOutcome / _call_gate / _apply_hitl / _safe_call + run 流程契约）+ `__tools_probe__.txt` 留痕（47 bytes 探针残留，git tracked 不被 import）+ compression/hook.py import 整理（顶部 import + 无 noqa）。`memory/manager.py.bak` 留痕（commit 43f68ada）→ 后续 CM commit `cecfef33` `git rm` 主动清理（见 ADR-0013 D8）。前次 commit `4f970a4d` 被 `6b7f3a99` revert；本 ADR-0011 重做 | ADR-0011 / ADR-0013 D8 |
 | v0.2.11 | 架构 doc 同步：autonomous.next_task 加 `window_s` 参数（默认 `DEFAULT_COOLDOWN_S=7200`），测试可短时间绕过冷却、不污染 module 常量；落地 commit `65b75fae`；本 ADR-0011 D4 doc sync | ADR-0011 |
 | v0.3.1 | 架构 doc 同步：工具面 19 个（+memory_recall_by_title +memory_update_title），§三表补 2 行 + §四不变量剩 17 个 + §二 memory_tools 注释 7 个 + §三表底 5 种 recall 风格 + §二模块清单 scoring/ 占位登记 + manager.py.bak 删除回溯。doc sync 落地 commit （本轮 ADR-0013）。ADR-0012 决策落地 + ADR-0013 增量 | ADR-0012 / ADR-0013 |
-| v0.3 (planned) | 长期记忆强化（recall 工具全量上线 ✅；待办：摘要压缩 hook 强化） | 待定 |
+| v0.5 (✅ 部分) | memory schema 5.9 整理：`_migrate_v59()` 恢复 5.4/5.6 时代随 5.7 -456 行重构丢失的 `idx_facts_tags` / `idx_facts_title` 两个索引（DDL-only，幂等 CREATE INDEX IF NOT EXISTS）；配套补 `manager.recent()` method（不过滤 archived，用于调试 / 复盘）；evolve_tools.py 与 test_evolve_tools.py 契约对齐（`RUNTIME_STATE_KEY_*` 常量 + `dry_run` / `suppress_restart` 参数）。doc 同步：ADR-0014（设计）+ ADR-0015（实际落地）。未做：`SCHEMA_VERSION` 常量 bump（已知遗留，5.9 是 DDL-only 二次回填不增字段）、自动 rollback / 世代谱可视化 | ADR-0014 / ADR-0015 |
