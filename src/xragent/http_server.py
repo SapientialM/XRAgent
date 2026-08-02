@@ -195,7 +195,15 @@ def _make_handler(token: str) -> type:
             pass
 
         def _check_token(self) -> bool:
-            """校验 Authorization 头是否匹配绑定 token；空 token 直接放行。"""
+            """校验 Authorization 头是否匹配绑定 token；空 token 直接放行。
+
+            闭包捕获外层 :func:`_make_handler` 的 ``token`` 形参；空 token
+            视为"关闭鉴权"（仅 dev），不等价于"任意 token 都通过"。
+
+            Returns:
+                True 表示通过鉴权；False 表示 Authorization 头不匹配，
+                调用方应发 401 后直接 return。
+            """
             if not token:
                 return True
             return self.headers.get("Authorization", "") == f"Bearer {token}"
@@ -358,9 +366,11 @@ def _make_handler(token: str) -> type:
             工具链保证 ``metamorphose`` 不会未经审批就执行。我们这里只做
             "父母显式同意" 的二次确认 — body.reason 必填。
 
-            Returns:
+            Side Effects:
+                通过 :func:`self._send_json` 把
                 ``{"ok": True, "result": <metamorphose 返回 dict>}`` 或失败
-                ``{"ok": False, "error": "<reason>"}``。
+                ``{"ok": False, "error": "<reason>"}`` 写入 HTTP 响应体；
+                函数自身返回 ``None``（HTTP handler 风格，不走 Python 返回值）。
             """
             reason = _coerce_text(body.get("reason"))
             if not reason:
