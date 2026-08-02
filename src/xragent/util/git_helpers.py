@@ -28,6 +28,17 @@
     是动态查找, fake_run 同样可见。``test_subprocess_utils.py`` 已锁这条。
   - ``SideGit.push`` 仍返回 ``(bool, str)``, ``SideGit._run`` 仍 raise ``RuntimeError``。
     这两条都被 ``test_sidegit.py`` 锁住, 行为不漂移就算通过。
+
+**v0.5.7 refactor (本轮)**: ``git_run`` / ``git_count_ahead`` 边界条件收紧.
+
+  - ``git_count_ahead`` 把 ``int(out or 0)`` 拆成"空 stdout 早返 + try int", ``or 0``
+    这个 hack 在阅读时让人猜("是防 int('') 还是防 None?");显式 ``if not out:
+    return 0`` 一眼看出"空输出 = 无 ahead"的边界语义。
+  - ``git_run`` 错误消息加 ``rc=`` 兜底: ``RC_RUNTIME_FAIL`` (-1) 由 ``run_capture``
+    在 timeout / FileNotFoundError / OSError 时返回, 此时 ``err`` 已是
+    ``str(exc).strip()``, 但极端情况下若 str(e) 为空, 旧消息会变成
+    ``"git X 失败: "`` 末尾空;加 ``err or f"rc={rc}"`` 让 caller 至少能看到
+    returncode 这一信息维度。
 """
 from __future__ import annotations
 
@@ -58,7 +69,8 @@ def git_run(
     Raises:
         RuntimeError: 当 ``check=True`` 且 rc != 0。消息格式
             ``"git <args> 失败: <err>"`` —— 这是 SideGit._run 旧契约,
-            test_sidegit.py 锁住。
+            test_sidegit.py 锁住;err 为空时 (RC_RUNTIME_FAIL 极端情况) 兜底
+            显示 ``rc=<n>``, 让 caller 至少能区分"运行失败" vs "git 命令失败"。
 
     Examples:
         >>> head = git_run(["rev-parse", "HEAD"], cwd=repo)
@@ -66,9 +78,10 @@ def git_run(
     """
     rc, out, err = run_capture(["git", *args], cwd=cwd, timeout=timeout)
     if check and rc != 0:
-        # rc 可能 == RC_RUNTIME_FAIL (-1): timeout / binary 缺失 / OS error
+        # rc 可能 == RC_RUNTIME_FAIL (-1): timeout / binary 缺失 / OS error;
+        # 这时 err 是 str(e).strip(), 极端空字符串时用 rc 兜底, 避免消息末尾空。
         # SideGit._run 旧消息用 stderr.strip(), 这里 err 已是 stripped
-        raise RuntimeError(f"git {' '.join(args)} 失败: {err}")
+        raise RuntimeError(f"git {' '.join(args)} 失败: {err or f'rc={rc}'}")
     return out
 
 
@@ -96,8 +109,13 @@ def git_count_ahead(
     )
     if rc != 0:
         return 0
+    if not out:
+        # 边界: 空 stdout 等同"无 ahead", 避免 ``int("")`` 走 ValueError 兜底路径。
+        # 旧写法 ``int(out or 0)`` 能工作但语义隐晦 (读者猜 "or 0" 是防 None?);
+        # 显式早返让意图清晰。
+        return 0
     try:
-        return int(out or 0)
+        return int(out)
     except ValueError:
         # 极端情况: git 输出了非数字 (e.g. "fatal: ...") 但 rc 仍 = 0? 理论上不会,
         # 但保险起见不要把 caller 弄崩
