@@ -15,6 +15,7 @@
 > [ADR-0013](adr/0013-architecture-v0-v0.3.1-doc-landing-and-manager-py-bak-removal.md)（v0.3.1 doc sync 落地：应用 ADR-0012 所有 D1-D7 + manager.py.bak 删除回溯 D8）。
 > [ADR-0014](adr/0014-architecture-v0-schema-5.9-and-stale-line-counts.md)（v0.5：schema 5.9 整理 doc sync 设计——§一 5.8→5.9 + §二行数 305→317 + §五 v0.5 行 + 顶部 ADR 清单）。
 > [ADR-0015](adr/0015-architecture-v0-landing-adr-0014-d1-d4.md)（v0.5：实际落地 ADR-0014 D1-D4——commit `f3d60758` 只新增了 ADR 文件，architecture-v0.md 的 4 处 drift（D1/D2/D4/D5）实际由本 ADR-0015 commit 修复；D3 §二 memory/manager.py 行注释一并按 D1 精神同步）。
+> [ADR-0016](adr/0016-architecture-v0-v0.5.x-snapshot-tag-index-and-count-cleanup.md)（v0.5.6~v0.5.9 + v0.11：snapshot/_tag_index.py 共享原语 + snapshot/count_cleanup.py 数量兜底 + dry_run）。
 
 ## 一、五大核心
 
@@ -23,7 +24,7 @@
 | 梦想 | `AGENTS.md` + `core/dream.py` + `core/react_loop.py`（ReAct 主循环）+ `core/backend.py`（LLM 适配） |
 | 父母 | `hitl/gate.py` + `http_server.py` |
 | 生活 | `tools/blacklist.py`（仓库根路径围栏 + 黑名单） |
-| 记忆 | `memory/manager.py` + `core/turn.py` + `snapshot/side_git.py`（v0.2+ 含 cleanup 入口，见 ADR-0003）<br>`memory/manager.py` 当前有效 schema **5.9**（5.0 基线 + 5.1 `source_turn_idx` + 5.3 `priority` + 5.4 `idx_facts_tags`（v0.5 5.9 二次回填）+ 5.5 `archived` + 5.6 `title` + 5.7 `confidence` + 5.8 `last_accessed_ts` LRU + 5.9 `idx_facts_title` 重建 + 5.4 `idx_facts_tags` 重建），基线见 ADR-0004，5.8 LRU 增量见 ADR-0008，5.9 索引回填见 ADR-0014<br>注：常量 `SCHEMA_VERSION = 58` 未 bump 是已知遗留（5.9 migration 是 DDL-only 的二次回填，不改字段），有效口径以 `_migrate_all()` 实际跑到的最后一个版本为准 |
+| 记忆 | `memory/manager.py` + `core/turn.py` + `snapshot/side_git.py`（v0.2+ 含 cleanup 入口，见 ADR-0003）<br>+ `snapshot/_tag_index.py`（v0.5.x 共享原语，见 ADR-0016）+ `snapshot/count_cleanup.py`（v0.11 数量兜底，见 ADR-0016）<br>`memory/manager.py` 当前有效 schema **5.9**（5.0 基线 + 5.1 `source_turn_idx` + 5.3 `priority` + 5.4 `idx_facts_tags`（v0.5 5.9 二次回填）+ 5.5 `archived` + 5.6 `title` + 5.7 `confidence` + 5.8 `last_accessed_ts` LRU + 5.9 `idx_facts_title` 重建 + 5.4 `idx_facts_tags` 重建），基线见 ADR-0004，5.8 LRU 增量见 ADR-0008，5.9 索引回填见 ADR-0014<br>注：常量 `SCHEMA_VERSION = 58` 未 bump 是已知遗留（5.9 migration 是 DDL-only 的二次回填，不改字段），有效口径以 `_migrate_all()` 实际跑到的最后一个版本为准 |
 | 成长 | `evolve/metamorphosis.py` + `evolve/generations.py` + `autonomous.py`（自驱动循环）<br>+ `watchdog/supervisor.py`（子进程异常自愈）+ `watchdog/runtime_state.py`（心跳文件，见 ADR-0005/0006） |
 
 补充说明：
@@ -77,6 +78,11 @@ src/xragent/
 │                             # （顶部 import + 无 noqa；见 ADR-0011 D5）
 ├── snapshot/side_git.py       # 每个 turn snapshot
 │                             # v0.2.3 新增 cleanup_old_snapshots()，见 ADR-0003
+├── snapshot/_tag_index.py     # v0.5.x 抽出: list_xragent_turn_tags / parse_xragent_turn_tags
+│                             #          / delete_tags 三个共享原语，让 cleanup 路径只剩策略
+│                             #          (time-cutoff / count-slice)，不再重复 for-each-ref + 行解析
+├── snapshot/count_cleanup.py  # v0.11: cleanup_old_snapshots_by_count(max_count, dry_run=False)
+│                             #          按 creatordate 数量兜底，与 cleanup_old_snapshots 互不冲突
 ├── watchdog/__init__.py
 ├── watchdog/runtime_state.py  # heartbeat 读写 + is_alive / restart_count / bump_restart
 ├── watchdog/supervisor.py     # 子进程守护：fork + heartbeat 检测 + restart + 世代记录
@@ -174,7 +180,7 @@ src/xragent/
 | HIL 通道是父母 | `hitl/gate.py`（仅响应人类父母指令） |
 | 高危工具须审批 | `tools/registry.py::build_default_registry()` 无参调用；自动读 `Settings.evolution_enabled`，<br>`False` 时 unregister `propose_self_replace` + `terminate`（剩 17 个） |
 | Diary 是真相 | `diary/YYYY-MM-DD.md` 人类可读 + `diary/turns/*` 结构化日志（Agent 不可自我粉饰） |
-| 失败可回滚 | `snapshot/side_git.py` 每 turn tag + v0.2.3 后 `cleanup_old_snapshots` 自动清理过期 tag（见 ADR-0003）；HUMAN 暴露成 `snapshot_cleanup` 工具供父母手动触发（见 ADR-0007） |
+| 失败可回滚 | `snapshot/side_git.py` 每 turn tag + **两条清理路径**：<br>· **时间维** `cleanup_old_snapshots(max_age_days, dry_run)` 保留近 N 天<br>· **数量维** `count_cleanup.cleanup_old_snapshots_by_count(max_count, dry_run)` 保留最新 N 个（v0.11，见 ADR-0016）<br>两条路径共享 `snapshot/_tag_index.py` 三个原语（`list_xragent_turn_tags` / `parse_xragent_turn_tags` / `delete_tags`，v0.5.x，见 ADR-0016），行格式 `%09` / `\t` 改一处时不再漂移。`snapshot_cleanup` 工具同时挂载两条清理路径供父母手动触发（见 ADR-0007） |
 | Push 节流 | `push_interval_minutes=30`（autonomous 模式每 30 min 批量 push 一次） |
 | 子进程异常可自愈 | `watchdog/supervisor.py` 定期读 `runtime_state.json` heartbeat，超过 `heartbeat_timeout_s` 未更新则判僵死、SIGTERM 后 fork 新子进程并 `bump_restart()`；累计 `restart_max_failures` 次失败后停。`runtime_state.json` 在 `write_blacklist` 里，Agent 不可改、自愈路径不被 Agent 干扰（见 ADR-0005 / ADR-0006） |
 | read_file 契约演进 | `tools/fs_tools.py::read_file` v0.3+ 多返回 `original_size` 字段（截断场景下与 `size` 不同，让父母看到真实大小），见 ADR-0007 |
@@ -203,3 +209,8 @@ src/xragent/
 | v0.2.11 | 架构 doc 同步：autonomous.next_task 加 `window_s` 参数（默认 `DEFAULT_COOLDOWN_S=7200`），测试可短时间绕过冷却、不污染 module 常量；落地 commit `65b75fae`；本 ADR-0011 D4 doc sync | ADR-0011 |
 | v0.3.1 | 架构 doc 同步：工具面 19 个（+memory_recall_by_title +memory_update_title），§三表补 2 行 + §四不变量剩 17 个 + §二 memory_tools 注释 7 个 + §三表底 5 种 recall 风格 + §二模块清单 scoring/ 占位登记 + manager.py.bak 删除回溯。doc sync 落地 commit （本轮 ADR-0013）。ADR-0012 决策落地 + ADR-0013 增量 | ADR-0012 / ADR-0013 |
 | v0.5 (✅ 部分) | memory schema 5.9 整理：`_migrate_v59()` 恢复 5.4/5.6 时代随 5.7 -456 行重构丢失的 `idx_facts_tags` / `idx_facts_title` 两个索引（DDL-only，幂等 CREATE INDEX IF NOT EXISTS）；配套补 `manager.recent()` method（不过滤 archived，用于调试 / 复盘）；evolve_tools.py 与 test_evolve_tools.py 契约对齐（`RUNTIME_STATE_KEY_*` 常量 + `dry_run` / `suppress_restart` 参数）。doc 同步：ADR-0014（设计）+ ADR-0015（实际落地）。未做：`SCHEMA_VERSION` 常量 bump（已知遗留，5.9 是 DDL-only 二次回填不增字段）、自动 rollback / 世代谱可视化 | ADR-0014 / ADR-0015 |
+| v0.5.6 | `evolve/metamorphosis.py` `_check_compile` per-file timeout (30s) + concurrent；`exec_tools._safe_decode` 直测 15 cases 锁契约（任意值→str） | ADR-0016 |
+| v0.5.7 | `memory/manager.py` `_safe_create_index` 加 PEP 604 hint + Google docstring（2 hints）；commit `a457993f` 同期 | ADR-0016 |
+| v0.5.8 | `snapshot/_tag_index.py` 抽出 3 共享原语（`list_xragent_turn_tags` / `parse_xragent_turn_tags` / `delete_tags`），让 `cleanup_old_snapshots` + `cleanup_old_snapshots_by_count` 只剩策略；行格式 `%09` / `\t` 单点维护 | ADR-0016 |
+| v0.5.9 | `snapshot/count_cleanup.py` 走 `_tag_index` helper（去掉 3 处 inline 重复）；保留/删除段用负索引 + 升序语义，无额外排序；commit `a59beb18` | ADR-0016 |
+| v0.11 | SideGit snapshot cleanup 加 `dry_run` 参数（按时间 + 按数量两条路径都加），仅列候选不实际 `git tag -d`；`snapshot_cleanup` 工具同步暴露 `dry_run`。ROADMAP v0.11 ✅，commit `0247b56b` | ADR-0016 |
