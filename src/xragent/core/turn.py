@@ -9,13 +9,6 @@ from typing import Any
 
 from ..config.settings import get_settings
 
-# Turn ID 格式约定：``YYYYMMDD-HHMMSS-mmm``。
-# 抽成 module-level 常量便于 (a) 复用、(b) 改格式时单点修改、
-# (c) 测试可按名引用而不是按字面量字符串匹配。
-_TURN_ID_FMT_PREFIX = "%Y%m%d-%H%M%S"  # date(8) + '-' + time(6) 共 15 字符
-_TURN_ID_MS_DIGITS = 3                  # 毫秒后缀位数：0..999
-_TURN_ID_SEP = "-"                      # 日期/时间/毫秒三段之间的分隔符
-
 
 @dataclass
 class TurnRecord:
@@ -71,6 +64,18 @@ class TraceRecorder:
         return path
 
 
+def _format_turn_id(t: float) -> str:
+    """按 ``YYYYMMDD-HHMMSS-mmm`` 格式把单次 ``time.time()`` 派生的时间戳拼成 turn id。
+
+    把 strftime 前缀 + ms 后缀压成一处,既保证 race fix（前后两段来自同一 ``t``,
+    跨秒边界不会错位）也让格式化逻辑独立于边界校验,便于单测直接调它验证格式
+    稳定性,无需走 :func:`new_turn_id` 的 ``now < 0`` 校验。
+    """
+    prefix = time.strftime("%Y%m%d-%H%M%S", time.localtime(t))
+    ms = int(t * 1000) % 1000
+    return f"{prefix}-{ms:03d}"
+
+
 def new_turn_id(now: float | None = None) -> str:
     """生成 turn id: ``YYYYMMDD-HHMMSS-mmm``。
 
@@ -90,6 +95,4 @@ def new_turn_id(now: float | None = None) -> str:
     if now is not None and now < 0:
         raise ValueError(f"now must be non-negative epoch seconds, got {now}")
     t = now if now is not None else time.time()
-    prefix = time.strftime(_TURN_ID_FMT_PREFIX, time.localtime(t))
-    ms = int(t * 1000) % 1000
-    return f"{prefix}{_TURN_ID_SEP}{ms:0{_TURN_ID_MS_DIGITS}d}"
+    return _format_turn_id(t)
