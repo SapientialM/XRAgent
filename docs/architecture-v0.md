@@ -16,7 +16,7 @@
 > [ADR-0014](adr/0014-architecture-v0-schema-5.9-and-stale-line-counts.md)（v0.5：schema 5.9 整理 doc sync 设计——§一 5.8→5.9 + §二行数 305→317 + §五 v0.5 行 + 顶部 ADR 清单）。
 > [ADR-0015](adr/0015-architecture-v0-landing-adr-0014-d1-d4.md)（v0.5：实际落地 ADR-0014 D1-D4——commit `f3d60758` 只新增了 ADR 文件，architecture-v0.md 的 4 处 drift（D1/D2/D4/D5）实际由本 ADR-0015 commit 修复；D3 §二 memory/manager.py 行注释一并按 D1 精神同步）。
 > [ADR-0016](adr/0016-architecture-v0-v0.5.x-snapshot-tag-index-and-count-cleanup.md)（v0.5.6~v0.5.9 + v0.11：snapshot/_tag_index.py 共享原语 + snapshot/count_cleanup.py 数量兜底 + dry_run）。
-> [ADR-0017](adr/0017-architecture-v0-doc-vs-code-drift-scan.md)（v0.13.1 doc sync：scoring/ 占位包状态从 v0.3.1 到 v0.13.1 持续缺 __init__.py、未 git tracked，重新确认这件事并同步 §二 / §四 / §五）。
+> [ADR-0017](adr/0017-architecture-v0-doc-vs-code-drift-scan.md)（v0.13.1 doc sync：scoring/ 占位包状态从 v0.3.1 到 v0.13.1 持续缺 __init__.py、未 git tracked，重新确认这件事并同步 §二 / §四 / §五；commit `3c1e2ae`）。
 
 ## 一、五大核心
 
