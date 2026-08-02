@@ -13,3 +13,6 @@ logs/
 
 # 外部参考项目（不入 git）
 references/
+
+# 防止 .bak 残留回留
+*.bak

@@ -221,6 +221,33 @@ class MemoryManager:
             ).fetchone()
         return self._row_to_fact(row) if row else None
 
+    def compress_if_needed(
+        self,
+        messages: list,
+        budget_tokens: int,
+        target_ratio: float = 0.7,
+    ) -> list:
+        """判断消息列表是否需要压缩, 超出预算时丢最早的非 system 消息.
+
+        走 :class:`xragent.compression.simple.SimpleCompression`, 与
+        ``scripts/test`` 的现有测试契约一致. ``budget_tokens`` 来自
+        ``settings.context_budget_tokens`` (默认 20_000); ``target_ratio``
+        默认 0.7 (留 30% 给后续迭代).
+
+        Args:
+            messages: 待压缩消息序列 (任何含 ``.role`` / ``.content`` 字段的对象).
+            budget_tokens: 触发压缩的 token 上限.
+            target_ratio: 目标压缩后占 budget 的比例.
+
+        Returns:
+            list: 压缩后的新列表. 未超预算时返回入参本身 (同一对象).
+        """
+        from ..compression.simple import SimpleCompression
+        c = SimpleCompression(budget_tokens=budget_tokens, target_ratio=target_ratio)
+        if not c.should_compress(messages):
+            return messages
+        return c.compress(messages)
+
     def close(self) -> None:
         """关闭底层 SQLite 连接, 释放 file handle。
 
