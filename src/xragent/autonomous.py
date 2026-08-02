@@ -119,6 +119,30 @@ DEFAULT_COOLDOWN_S: float = 7200.0
 _MAX_SUMMARY_CHARS: int = 500
 
 
+def _is_real_number(x: Any) -> bool:
+    """判断 ``x`` 是不是"真数字"（``int``/``float`` 但排除 ``bool``）。
+
+    边界条件：``bool`` 是 ``int`` 的子类，``isinstance(True, int) is True``；
+    如果只查 ``isinstance(x, (int, float))``，会把 ``True``/``False`` 误判为
+    时间戳 ``1``/``0``，导致 cooldown 窗口过滤形同虚设——``ts=0`` 永远
+    ``< cutoff``（被踢）但 ``ts=1``（1970-01-01 00:00:01 UTC）反而被判
+    "近期"。这里显式排除 ``bool``，保护 ``_recent_titles`` 的窗口语义。
+
+    抽到模块级 helper（vs 内联 isinstance 链）原因：
+      1. 意图自描述：调用点从 ``isinstance(ts, (int, float)) and not isinstance(ts, bool)``
+         变成 ``_is_real_number(ts)``，读代码的人不用反推"为啥要拒 bool"。
+      2. 复用：如果后续 ``record_done`` / 其他 ts 校验也要同样语义，
+         不会再复制粘贴一次 isinstance 链（drift 风险）。
+
+    Args:
+        x: 任意对象（可能 None / str / list / bool / int / float）。
+
+    Returns:
+        True 当且仅当 ``x`` 是 ``int`` 或 ``float`` 且不是 ``bool``。
+    """
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
 def _recent_titles(window_s: float = DEFAULT_COOLDOWN_S) -> set[str]:
     """返回最近 window_s 秒内做过的任务 title 集合（用于 cooldown）。
 
@@ -141,9 +165,10 @@ def _recent_titles(window_s: float = DEFAULT_COOLDOWN_S) -> set[str]:
         # rec 必须是 dict；非 dict（list/str/标量）跳过
         if not isinstance(rec, dict):
             continue
-        # ts 必须是数字（且不是 bool，bool 是 int 子类会被静默吞）
+        # ts 必须是真数字（int/float 且不是 bool；helper 显式排除 bool，
+        # 避免 isinstance(True, int) 这种子类陷阱污染窗口过滤）
         ts = rec.get("ts")
-        if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        if not _is_real_number(ts):
             continue
         if ts >= cutoff:
             seen.add(rec.get("title", ""))
@@ -189,10 +214,7 @@ def record_done(task: dict[str, Any], turn_id: str, summary: str) -> None:
         summary: 完成情况描述，会被截断到 500 字符。
 
     Note:
-        历史 here 手写 ``p.parent.mkdir + open(a) + json.dumps + write`` 共 5 行，
-        与 ``util.jsonl_utils.append_jsonl``（同模式）重复。改成调用 helper 后
-        行为不变（同样 ensure_ascii=False + 末尾 \\n + mkdir parent），但去掉了
-        一处可能漂移的复制粘贴。
+        历史 here 手写 ``p.parent.mkdir + open(a) + json.dumps + write`` 共 5 行，\n        与 ``util.jsonl_utils.append_jsonl``（同模式）重复。改成调用 helper 后\n        行为不变（同样 ensure_ascii=False + 末尾 \\n + mkdir parent），但去掉了\n        一处可能漂移的复制粘贴。
     """
     rec = {
         "ts": time.time(),

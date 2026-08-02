@@ -28,6 +28,7 @@ from xragent.autonomous import (
     task_cooldown_key,
     task_queue_path,
     _recent_titles,
+    _is_real_number,
 )
 
 
@@ -286,3 +287,42 @@ def test_task_templates_titles_are_unique():
     """title 必须唯一——否则 cooldown 形同虚设（重复 title 互相抵消）。"""
     titles = [t["title"] for t in TASK_TEMPLATES]
     assert len(titles) == len(set(titles)), f"重复 template title: {titles}"
+
+
+# ---------------------------------------------------------------------------
+# _is_real_number (helper for _recent_titles ts validation; 边界条件：拒 bool)
+# ---------------------------------------------------------------------------
+
+def test_is_real_number_accepts_int_and_float():
+    """int / float（包含 0 / 负数 / 1e10）都判 True。"""
+    for v in [0, 1, -1, 1.5, 0.0, 1e10, -3.14]:
+        assert _is_real_number(v) is True, f"expected True for {v!r}"
+
+
+def test_is_real_number_rejects_bool_and_non_numeric():
+    """bool / None / str / list / dict 全判 False（拒 bool 是关键边界）。"""
+    for v in [True, False, None, "1718000000", "1.5", "", [], [1], {}, {"ts": 1}]:
+        assert _is_real_number(v) is False, f"expected False for {v!r}"
+
+
+def test_recent_titles_skips_record_with_bool_ts(repo_root: Path):
+    """_recent_titles 必须把 ts=true/false 的脏行跳掉，不能误判为"近期"。
+
+    bool 是 int 子类，旧 isinstance(ts, (int, float)) 写法会把 ts=True (=1)
+    当成"1970-01-01 00:00:01 UTC"放行到窗口过滤里——窗口通常远大于 1s，
+    于是这条"近期"判定就把 bool 脏行带进来了。_is_real_number 显式拒 bool。
+    """
+    p = task_queue_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {"ts": time.time() - 60, "title": "真记录", "turn_id": "t1", "summary": ""},
+        {"ts": True, "title": "bool 陷阱", "turn_id": "t2", "summary": ""},
+    ]
+    p.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    seen = _recent_titles(window_s=3600)
+    assert "真记录" in seen
+    assert "bool 陷阱" not in seen
