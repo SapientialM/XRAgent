@@ -16,6 +16,7 @@
 > [ADR-0014](adr/0014-architecture-v0-schema-5.9-and-stale-line-counts.md)（v0.5：schema 5.9 整理 doc sync 设计——§一 5.8→5.9 + §二行数 305→317 + §五 v0.5 行 + 顶部 ADR 清单）。
 > [ADR-0015](adr/0015-architecture-v0-landing-adr-0014-d1-d4.md)（v0.5：实际落地 ADR-0014 D1-D4——commit `f3d60758` 只新增了 ADR 文件，architecture-v0.md 的 4 处 drift（D1/D2/D4/D5）实际由本 ADR-0015 commit 修复；D3 §二 memory/manager.py 行注释一并按 D1 精神同步）。
 > [ADR-0016](adr/0016-architecture-v0-v0.5.x-snapshot-tag-index-and-count-cleanup.md)（v0.5.6~v0.5.9 + v0.11：snapshot/_tag_index.py 共享原语 + snapshot/count_cleanup.py 数量兜底 + dry_run）。
+> [ADR-0017](adr/0017-architecture-v0-doc-vs-code-drift-scan.md)（v0.13.1 doc sync：scoring/ 占位包状态从 v0.3.1 到 v0.13.1 持续缺 __init__.py、未 git tracked，重新确认这件事并同步 §二 / §四 / §五）。
 
 ## 一、五大核心
 
@@ -128,8 +129,10 @@ src/xragent/
 │                             #   http_parents.py: setup_http_parents_channel（v0.2.8，见 ADR-0009）
 ├── __tools_probe__.txt        # 47 bytes 探针残留（commit 91ea0843 同期，git tracked，
 │                             #   当前不被 import，清理决策留给后续轮次，见 ADR-0011 D3）
-├── scoring/                   # 占位包（v0.3.1 状态：仅 __pycache__/，缺 __init__.py，未 git tracked；
-│                             #   预留 v0.4 评分基线 ROADMAP.md 用；本轮 ADR-0012 / 0013 不建不删）
+├── scoring/                   # 占位包（v0.13.1 状态：持续仅 __pycache__/，缺 __init__.py，未 git tracked；
+│                             #   v0.3.1（ADR-0012 / ADR-0013 D6）登记预留 v0.4 评分基线；
+│                             #   v0.13.1（ADR-0017）重新确认仍未建不删；ROADMAP 未把 scoring/
+│                             #   提为 blocked，cleanup 决策留给后续轮次）
 └── llm/                       # 占位包，目前仅 __init__.py
 ```
 
@@ -188,7 +191,7 @@ src/xragent/
 | Autonomous next_task 参数化冷却 | `autonomous.next_task(rng=None, window_s=DEFAULT_COOLDOWN_S)` v0.2.11 起：`window_s` 显式参数（默认 7200s），不污染 module 常量，便于测试短时间绕过冷却（见 ADR-0011 D4） |
 | tools/registry 探针文件留痕 | `src/xragent/__tools_probe__.txt` v0.2.10 起：47 bytes 探针残留（commit 91ea0843 同期），git tracked，不被 import；清理决策留给后续轮次（见 ADR-0011 D3） |
 | compression/hook.py import 清洁 | `compression/hook.py` v0.2.10 起：顶部 import 整理、无 noqa 残留；保持 hook 表可读性（见 ADR-0011 D5） |
-| scoring/ 目录占位 | `src/xragent/scoring/` v0.3.1 状态：仅 `__pycache__/`，缺 `__init__.py`，未 git tracked；预留 v0.4 评分基线（见 ADR-0012 / ADR-0013 D6） |
+| scoring/ 目录占位 | `src/xragent/scoring/` v0.13.1 状态：持续仅 `__pycache__/`，缺 `__init__.py`，未 git tracked；v0.3.1 登记预留 v0.4 评分基线（ADR-0012 / ADR-0013 D6）；v0.13.1 重新确认仍未建不删，cleanup 决策留给后续轮次（见 ADR-0017） |
 
 ## 五、版本对照
 
