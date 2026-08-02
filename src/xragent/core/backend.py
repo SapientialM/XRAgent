@@ -42,8 +42,46 @@ class Message:
 
 
 class BackendProtocol(Protocol):
-    def chat(self, messages: list[Message], tools: list[ToolSpec]) -> Turn: ...
-    def stream_chat(self, messages: list[Message], tools: list[ToolSpec]) -> Iterator[Turn]: ...
+    """LLM backend 实现的最小契约。
+
+    上层 Agent 通过该 Protocol 拿到 backend，不绑具体实现；任何满足
+    ``chat`` / ``stream_chat`` 签名的对象都可注入。
+    """
+
+    def chat(self, messages: list[Message], tools: list[ToolSpec]) -> Turn:
+        """一次性 chat 调用: 接收完整消息历史 + 工具规范, 返回一条 Turn。
+
+        实现方应把 ``messages`` 转为自家 backend（LangChain / mock /
+        minimaxi 等）的内部格式, 调一次 LLM 后包成 :class:`Turn` 返回;
+        ``tool_calls`` 缺 ``id`` 时由实现方负责补全, 调用方不做假设。
+
+        Args:
+            messages: 当前会话消息序列；至少含 1 条 system prompt。
+            tools: 可用工具规范列表；非空时按 ``tool_choice`` 协议注入
+                给模型。
+
+        Returns:
+            Turn: 单轮响应（含 ``content`` / ``tool_calls`` / ``usage``）。
+        """
+        ...
+
+    def stream_chat(
+        self, messages: list[Message], tools: list[ToolSpec]
+    ) -> Iterator[Turn]:
+        """流式 chat: 返回 ``Turn`` 迭代器。
+
+        流式协议：调用方按 ``finish_reason`` 决定是否停止迭代；通常
+        ``"stop"`` 表示正常结束, ``"tool_calls"`` 表示有工具调用。
+        mock backend 也只 ``yield`` 一条完整 Turn, 以保持签名一致。
+
+        Args:
+            messages: 同 :meth:`chat`。
+            tools: 同 :meth:`chat`。
+
+        Yields:
+            Turn: 增量响应片段；至少 ``yield`` 一次。
+        """
+        ...
 
 
 _MOCK_RESPONSES_PATH = os.environ.get("XRAGENT_MOCK_SCRIPT")

@@ -13,8 +13,37 @@ class CompressionProtocol(Protocol):
       * ``compress`` 触发后返回 ``messages`` 的新视图，**不**就地修改入参
     """
 
-    def should_compress(self, messages: list[Any]) -> bool: ...
-    def compress(self, messages: list[Any]) -> list[Any]: ...
+    def should_compress(self, messages: list[Any]) -> bool:
+        """判断 ``messages`` 是否需要压缩。
+
+        纯判等（``approx_tokens > self.budget`` 严格大于），无副作用。
+        调用方可在每次 LLM 调用前 cheap 探测一次，再决定是否调用
+        :meth:`compress`。
+
+        Args:
+            messages: 待检查的消息序列；只读访问 ``.content`` 属性，
+                不应被本方法就地修改。
+
+        Returns:
+            bool: 估算 token 数严格大于 ``self.budget`` 时为 ``True``；
+                等于或不超过时为 ``False``。
+        """
+        ...
+
+    def compress(self, messages: list[Any]) -> list[Any]:
+        """把 ``messages`` 压缩到 budget 之下，返回新列表。
+
+        实现约束：不就地修改入参；保留首条 system 消息 + 尾部
+        ``_KEEP_RECENT`` 条非 system 消息；未触发压缩阈值时返回入参
+        本身（同一对象，不做拷贝）。
+
+        Args:
+            messages: 待压缩的消息序列；本方法不会就地修改它。
+
+        Returns:
+            list[Any]: 压缩后的新列表；未触发压缩时直接返回入参本身。
+        """
+        ...
 
 
 _KEEP_RECENT = 6
