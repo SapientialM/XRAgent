@@ -89,6 +89,16 @@ class MemoryManager:
         "ON facts(last_accessed_ts ASC)",
     ]
 
+    @staticmethod
+    def _safe_create_index(conn, ddl):
+        try:
+            conn.execute(ddl)
+            return True
+        except Exception as e:
+            if "no such column" in str(e) or "no such table" in str(e):
+                return False
+            raise
+
     def __init__(self, db_path: str | None = None) -> None:
         """打开 SQLite 连接, 初始化 schema 并跑一遍所有 migration。
 
@@ -234,7 +244,11 @@ class MemoryManager:
         with self._lock, self._conn:
             self._conn.executescript(self._TABLE_DDL)
             for ddl in self._INDEXES_DDL:
-                self._conn.execute(ddl)
+                try:
+                    self._conn.execute(ddl)
+                except Exception as e:
+                    if "no such column" not in str(e):
+                        raise
 
     def _migrate_all(self) -> None:
         """依次执行 _migrate_v5X, 幂等。"""
@@ -256,9 +270,9 @@ class MemoryManager:
                 self._conn.execute("ALTER TABLE facts ADD COLUMN source_turn_idx INTEGER")
         # 索引幂等 (IF NOT EXISTS)
         with self._lock, self._conn:
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_facts_source_turn_idx "
-                "ON facts(source_turn_idx)"
+                            self._safe_create_index(
+                self._conn,
+                "CREATE INDEX IF NOT EXISTS idx_facts_source_turn_idx  ON facts(source_turn_idx)",
             )
 
     # ---- 5.3 ----
@@ -271,9 +285,9 @@ class MemoryManager:
                     "ALTER TABLE facts ADD COLUMN priority INTEGER NOT NULL DEFAULT 0"
                 )
         with self._lock, self._conn:
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_facts_category_priority_ts "
-                "ON facts(category, priority DESC, ts DESC)"
+                            self._safe_create_index(
+                self._conn,
+                "CREATE INDEX IF NOT EXISTS idx_facts_category_priority_ts  ON facts(category, priority DESC, ts DESC)",
             )
 
     # ---- 5.4 ----
@@ -282,7 +296,7 @@ class MemoryManager:
 
         表结构没变, 只加索引. 老库已存在则 CREATE INDEX IF NOT EXISTS 跳过.
         5.7 重构 (-456 行) 时忘了重建, _migrate_v59 也会兜底再补一次."""
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_tags ON facts(tags)")
+        self._safe_create_index(self._conn, "CREATE INDEX IF NOT EXISTS idx_facts_tags ON facts(tags)")
 
     # ---- 5.5 ----
     def _migrate_v55(self) -> None:
@@ -309,9 +323,9 @@ class MemoryManager:
                     "ALTER TABLE facts ADD COLUMN title TEXT NOT NULL DEFAULT ''"
                 )
         with self._lock, self._conn:
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_facts_category_ts "
-                "ON facts(category, ts DESC)"
+                            self._safe_create_index(
+                self._conn,
+                "CREATE INDEX IF NOT EXISTS idx_facts_category_ts  ON facts(category, ts DESC)",
             )
 
     # ---- 5.7 ----
@@ -326,9 +340,9 @@ class MemoryManager:
                     "ALTER TABLE facts ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0"
                 )
         with self._lock, self._conn:
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_facts_confidence_ts "
-                "ON facts(confidence DESC, ts DESC)"
+                            self._safe_create_index(
+                self._conn,
+                "CREATE INDEX IF NOT EXISTS idx_facts_confidence_ts  ON facts(confidence DESC, ts DESC)",
             )
 
     # ---- 5.8 ----
@@ -347,9 +361,9 @@ class MemoryManager:
                     "REAL NOT NULL DEFAULT 0.0"
                 )
         with self._lock, self._conn:
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_facts_last_accessed_ts "
-                "ON facts(last_accessed_ts ASC)"
+                            self._safe_create_index(
+                self._conn,
+                "CREATE INDEX IF NOT EXISTS idx_facts_last_accessed_ts  ON facts(last_accessed_ts ASC)",
             )
 
     def _migrate_v59(self) -> None:
@@ -369,8 +383,8 @@ class MemoryManager:
         会自动 skip (PRAGMA user_version 已经 +1)。
         """
         with self._lock, self._conn:
-            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_tags ON facts(tags)")
-            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_title ON facts(title)")
+            self._safe_create_index(self._conn, "CREATE INDEX IF NOT EXISTS idx_facts_tags ON facts(tags)")
+            self._safe_create_index(self._conn, "CREATE INDEX IF NOT EXISTS idx_facts_title ON facts(title)")
 
     # ---- CRUD ----
 
