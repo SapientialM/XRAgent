@@ -17,6 +17,8 @@
 > [ADR-0015](adr/0015-architecture-v0-landing-adr-0014-d1-d4.md)（v0.5：实际落地 ADR-0014 D1-D4——commit `f3d60758` 只新增了 ADR 文件，architecture-v0.md 的 4 处 drift（D1/D2/D4/D5）实际由本 ADR-0015 commit 修复；D3 §二 memory/manager.py 行注释一并按 D1 精神同步）。
 > [ADR-0016](adr/0016-architecture-v0-v0.5.x-snapshot-tag-index-and-count-cleanup.md)（v0.5.6~v0.5.9 + v0.11：snapshot/_tag_index.py 共享原语 + snapshot/count_cleanup.py 数量兜底 + dry_run）。
 > [ADR-0017](adr/0017-architecture-v0-doc-vs-code-drift-scan.md)（v0.13.1 doc sync：scoring/ 占位包状态从 v0.3.1 到 v0.13.1 持续缺 __init__.py、未 git tracked，重新确认这件事并同步 §二 / §四 / §五；commit `3c1e2ae`）。
+> [ADR-0018](adr/0018-architecture-v0-util-print-guard-and-scoring-empty.md)（v0.10 round 215+ close-out doc sync：util/print_guard.py 抽取补录（§一 §二 §五）+ scoring/ 二次清空措辞更新（§二 §四）；commit `59387b4d`）。
+> [ADR-0019](adr/0019-architecture-v0-snapshot-age-cleanup-standalone.md)（v0.11+ round 231 doc sync：snapshot/age_cleanup.py 时间清理 standalone 镜像抽取（§一 §二 §四 §五），commit `fbe16191`；side_git.py inline wrapper 是否改 caller→callee 留给后续 round）。
 
 ## 一、五大核心
 
@@ -25,7 +27,7 @@
 | 梦想 | `AGENTS.md` + `core/dream.py` + `core/react_loop.py`（ReAct 主循环）+ `core/backend.py`（LLM 适配） |
 | 父母 | `hitl/gate.py` + `http_server.py` |
 | 生活 | `tools/blacklist.py`（仓库根路径围栏 + 黑名单） |
-| 记忆 | `memory/manager.py` + `core/turn.py` + `snapshot/side_git.py`（v0.2+ 含 cleanup 入口，见 ADR-0003）<br>+ `snapshot/_tag_index.py`（v0.5.x 共享原语，见 ADR-0016）+ `snapshot/count_cleanup.py`（v0.11 数量兜底，见 ADR-0016）<br>`memory/manager.py` 当前有效 schema **5.9**（5.0 基线 + 5.1 `source_turn_idx` + 5.3 `priority` + 5.4 `idx_facts_tags`（v0.5 5.9 二次回填）+ 5.5 `archived` + 5.6 `title` + 5.7 `confidence` + 5.8 `last_accessed_ts` LRU + 5.9 `idx_facts_title` 重建 + 5.4 `idx_facts_tags` 重建），基线见 ADR-0004，5.8 LRU 增量见 ADR-0008，5.9 索引回填见 ADR-0014<br>注：常量 `SCHEMA_VERSION = 58` 未 bump 是已知遗留（5.9 migration 是 DDL-only 的二次回填，不改字段），有效口径以 `_migrate_all()` 实际跑到的最后一个版本为准 |
+| 记忆 | `memory/manager.py` + `core/turn.py` + `snapshot/side_git.py`（v0.2+ 含 cleanup 入口，见 ADR-0003）<br>+ `snapshot/_tag_index.py`（v0.5.x 共享原语，见 ADR-0016）+ `snapshot/count_cleanup.py`（v0.11 数量兜底，见 ADR-0016）<br>+ `snapshot/age_cleanup.py`（v0.11+ 时间清理 standalone 镜像，与 `count_cleanup.py` 对称，见 ADR-0019）<br>`memory/manager.py` 当前有效 schema **5.9**（5.0 基线 + 5.1 `source_turn_idx` + 5.3 `priority` + 5.4 `idx_facts_tags`（v0.5 5.9 二次回填）+ 5.5 `archived` + 5.6 `title` + 5.7 `confidence` + 5.8 `last_accessed_ts` LRU + 5.9 `idx_facts_title` 重建 + 5.4 `idx_facts_tags` 重建），基线见 ADR-0004，5.8 LRU 增量见 ADR-0008，5.9 索引回填见 ADR-0014<br>注：常量 `SCHEMA_VERSION = 58` 未 bump 是已知遗留（5.9 migration 是 DDL-only 的二次回填，不改字段），有效口径以 `_migrate_all()` 实际跑到的最后一个版本为准 |
 | 成长 | `evolve/metamorphosis.py` + `evolve/generations.py` + `autonomous.py`（自驱动循环）<br>+ `watchdog/supervisor.py`（子进程异常自愈）+ `watchdog/runtime_state.py`（心跳文件，见 ADR-0005/0006） |
 
 补充说明：
@@ -84,6 +86,9 @@ src/xragent/
 │                             #          (time-cutoff / count-slice)，不再重复 for-each-ref + 行解析
 ├── snapshot/count_cleanup.py  # v0.11: cleanup_old_snapshots_by_count(max_count, dry_run=False)
 │                             #          按 creatordate 数量兜底，与 cleanup_old_snapshots 互不冲突
+├── snapshot/age_cleanup.py    # v0.11+ (round 231): cleanup_old_snapshots_by_age(max_age_days, dry_run=False)
+│                             #          时间清理 standalone 镜像（与 count_cleanup 对称），走 _tag_index helper
+│                             #          commit `fbe16191`，见 ADR-0019；side_git.py 旧 inline wrapper 保留
 ├── watchdog/__init__.py
 ├── watchdog/runtime_state.py  # heartbeat 读写 + is_alive / restart_count / bump_restart
 ├── watchdog/supervisor.py     # 子进程守护：fork + heartbeat 检测 + restart + 世代记录
@@ -183,7 +188,7 @@ src/xragent/
 | HIL 通道是父母 | `hitl/gate.py`（仅响应人类父母指令） |
 | 高危工具须审批 | `tools/registry.py::build_default_registry()` 无参调用；自动读 `Settings.evolution_enabled`，<br>`False` 时 unregister `propose_self_replace` + `terminate`（剩 17 个） |
 | Diary 是真相 | `diary/YYYY-MM-DD.md` 人类可读 + `diary/turns/*` 结构化日志（Agent 不可自我粉饰） |
-| 失败可回滚 | `snapshot/side_git.py` 每 turn tag + **两条清理路径**：<br>· **时间维** `cleanup_old_snapshots(max_age_days, dry_run)` 保留近 N 天<br>· **数量维** `count_cleanup.cleanup_old_snapshots_by_count(max_count, dry_run)` 保留最新 N 个（v0.11，见 ADR-0016）<br>两条路径共享 `snapshot/_tag_index.py` 三个原语（`list_xragent_turn_tags` / `parse_xragent_turn_tags` / `delete_tags`，v0.5.x，见 ADR-0016），行格式 `%09` / `\t` 改一处时不再漂移。`snapshot_cleanup` 工具同时挂载两条清理路径供父母手动触发（见 ADR-0007） |
+| 失败可回滚 | `snapshot/side_git.py` 每 turn tag + **两条清理路径**：<br>· **时间维** 两入口并存：<br>&nbsp;&nbsp;· `snapshot/age_cleanup.py::cleanup_old_snapshots_by_age(max_age_days, dry_run=False)` —— 模块级（v0.11+，见 ADR-0019，推荐路径）<br>&nbsp;&nbsp;· `snapshot/side_git.py::cleanup_old_snapshots(max_age_days, dry_run)` —— 兼容 wrapper（v0.2+ 见 ADR-0003，inline 实现，与模块版功能等价）<br>· **数量维** `count_cleanup.cleanup_old_snapshots_by_count(max_count, dry_run)` 保留最新 N 个（v0.11，见 ADR-0016）<br>三条入口共享 `snapshot/_tag_index.py` 三个原语（`list_xragent_turn_tags` / `parse_xragent_turn_tags` / `delete_tags`，v0.5.x，见 ADR-0016），行格式 `%09` / `\t` 改一处时不再漂移。`snapshot_cleanup` 工具同时挂载两条清理路径供父母手动触发（见 ADR-0007） |
 | Push 节流 | `push_interval_minutes=30`（autonomous 模式每 30 min 批量 push 一次） |
 | 子进程异常可自愈 | `watchdog/supervisor.py` 定期读 `runtime_state.json` heartbeat，超过 `heartbeat_timeout_s` 未更新则判僵死、SIGTERM 后 fork 新子进程并 `bump_restart()`；累计 `restart_max_failures` 次失败后停。`runtime_state.json` 在 `write_blacklist` 里，Agent 不可改、自愈路径不被 Agent 干扰（见 ADR-0005 / ADR-0006） |
 | read_file 契约演进 | `tools/fs_tools.py::read_file` v0.3+ 多返回 `original_size` 字段（截断场景下与 `size` 不同，让父母看到真实大小），见 ADR-0007 |
@@ -217,3 +222,4 @@ src/xragent/
 | v0.5.8 | `snapshot/_tag_index.py` 抽出 3 共享原语（`list_xragent_turn_tags` / `parse_xragent_turn_tags` / `delete_tags`），让 `cleanup_old_snapshots` + `cleanup_old_snapshots_by_count` 只剩策略；行格式 `%09` / `\t` 单点维护 | ADR-0016 |
 | v0.5.9 | `snapshot/count_cleanup.py` 走 `_tag_index` helper（去掉 3 处 inline 重复）；保留/删除段用负索引 + 升序语义，无额外排序；commit `a59beb18` | ADR-0016 |
 | v0.11 | SideGit snapshot cleanup 加 `dry_run` 参数（按时间 + 按数量两条路径都加），仅列候选不实际 `git tag -d`；`snapshot_cleanup` 工具同步暴露 `dry_run`。ROADMAP v0.11 ✅，commit `0247b56b` | ADR-0016 |
+| v0.11+ (round 231) | `snapshot/age_cleanup.py` 抽出时间清理 standalone 镜像（与 `count_cleanup.py` 对称）；<br>模块级 `cleanup_old_snapshots_by_age(max_age_days, dry_run=False)` 全部走 `_tag_index` helper；<br>`side_git.py::cleanup_old_snapshots` 保留为兼容 wrapper（未删除，inline 路径未改 caller→callee，留给后续 round）；<br>commit `fbe16191`<br>注：ROADMAP 未把本轮拆为独立 v0.12，**实际 ship 但版本号待 v0.12 决策时合并** | ADR-0019 |
