@@ -136,6 +136,98 @@ class TestCoerceInt:
         # LLM 偶尔会脑抽传一个巨大的整数, 只要 >= min_value 就原样保留
         assert exec_tools._coerce_int(10_000_000, 30) == 10_000_000
 
+
+class TestSafeDecode:
+    """_safe_decode 直测: 锁住"任意值 → str"契约。
+
+    设计目标: 收敛 fs_tools / web_search / evolve_tools 里散落的
+    decode("utf-8", errors="replace") 站点。当前只有 _truncate_output
+    走它，但 helper 公开了，未来重构会被多个模块复用，先把契约钉死。
+
+    关键边界:
+      * None → 空串 (不要 raise, subprocess 输出可能为 None)
+      * bytes → utf-8 decode，无效序列用 U+FFFD 替换
+      * str → 原样返回 (不二次解码)
+      * 异常对象 / 数字 → repr() 兜底
+      * 不抛异常 (即使 type 完全不在预期里)
+    """
+
+    def test_none_returns_empty_string(self) -> None:
+        assert exec_tools._safe_decode(None) == ""
+
+    def test_empty_bytes_returns_empty_string(self) -> None:
+        assert exec_tools._safe_decode(b"") == ""
+
+    def test_empty_str_returns_empty_string(self) -> None:
+        assert exec_tools._safe_decode("") == ""
+
+    def test_str_passthrough(self) -> None:
+        # 关键: str 必须原样返回, 不能被二次解码当成 bytes
+        assert exec_tools._safe_decode("hello\nworld") == "hello\nworld"
+
+    def test_str_with_unicode_preserved(self) -> None:
+        # utf-8 字符串往返, 含中文/emoji
+        s = "测试 🌱 hello"
+        assert exec_tools._safe_decode(s) == s
+
+    def test_bytes_utf8_decoded(self) -> None:
+        assert exec_tools._safe_decode(b"hello") == "hello"
+        assert exec_tools._safe_decode("测试".encode("utf-8")) == "测试"
+
+    def test_bytes_invalid_utf8_uses_replacement_char(self) -> None:
+        # 0xff 单字节是无效 utf-8 lead byte; 必须用 U+FFFD 替换,
+        # 不能抛 UnicodeDecodeError
+        out = exec_tools._safe_decode(b"hi \xff world")
+        assert isinstance(out, str)
+        assert "hi " in out
+        assert "world" in out
+        assert "\ufffd" in out
+
+    def test_bytes_only_invalid_returns_replacement(self) -> None:
+        # 全部无效 → 全是 replacement char, 但仍是合法 str
+        out = exec_tools._safe_decode(b"\xff\xfe\xfd")
+        assert isinstance(out, str)
+        assert len(out) == 3
+        assert all(c == "\ufffd" for c in out)
+
+    def test_int_falls_back_to_repr(self) -> None:
+        assert exec_tools._safe_decode(12345) == "12345"
+        assert exec_tools._safe_decode(0) == "0"
+        assert exec_tools._safe_decode(-7) == "-7"
+
+    def test_float_falls_back_to_repr(self) -> None:
+        assert exec_tools._safe_decode(3.14) == "3.14"
+
+    def test_bool_falls_back_to_repr(self) -> None:
+        # bool 不是 bytes/str/None → 走 repr 兜底
+        assert exec_tools._safe_decode(True) == "True"
+        assert exec_tools._safe_decode(False) == "False"
+
+    def test_exception_falls_back_to_repr(self) -> None:
+        # 异常对象走 repr (含类名), 用于 TimeoutExpired.stderr 这种坏值场景
+        e = ValueError("boom")
+        out = exec_tools._safe_decode(e)
+        assert isinstance(out, str)
+        assert "ValueError" in out
+        assert "boom" in out
+
+    def test_list_falls_back_to_repr(self) -> None:
+        # 容器走 repr, 不抛 TypeError
+        out = exec_tools._safe_decode([1, 2, 3])
+        assert isinstance(out, str)
+        assert "[1, 2, 3]" in out
+
+    def test_dict_falls_back_to_repr(self) -> None:
+        out = exec_tools._safe_decode({"k": "v"})
+        assert isinstance(out, str)
+        assert "{'k': 'v'}" in out
+
+    def test_does_not_raise_on_arbitrary_object(self) -> None:
+        # 终极兜底: 自定义对象走 repr, 不应该 raise
+        class Opaque:
+            def __repr__(self) -> str:
+                return "<Opaque>"
+        assert exec_tools._safe_decode(Opaque()) == "<Opaque>"
 # -------------------- _truncate_output: head + tail 双段 --------------------
 
 class TestTruncateOutputHeadTail:
