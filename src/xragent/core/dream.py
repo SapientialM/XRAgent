@@ -30,6 +30,28 @@ def load_dream() -> str:
     return p.read_text(encoding="utf-8")
 
 
+def _matches_blacklist_item(rel_str: str, item: str) -> bool:
+    """判定 ``rel_str`` 是否命中 ``write_blacklist`` 的某一条 ``item``。
+
+    匹配语义（边界条件，必须明确）:
+      * 相等 —— 命中"文件级"黑名单 (``item`` 是个具体文件路径)
+      * ``rel_str`` 以 ``item + "/"`` 开头 —— 命中"目录级"黑名单
+        (``item`` 是个目录，相对路径要"位于其下")
+
+    关键边界: **必须用** ``item + "/"`` 而不是 ``item`` 单独 startswith,
+    否则 ``"AGENTS.md.bak"`` 会被误判为命中 ``"AGENTS.md"`` 黑名单
+    (文件名后缀追加是常见副作用, 不该被无端拦截)。
+
+    Args:
+        rel_str: 相对仓库根的 POSIX 路径字符串。
+        item: 单条黑名单项 (来自 :attr:`Settings.write_blacklist`)。
+
+    Returns:
+        ``rel_str`` 是否等于 ``item`` 或位于其子路径下。
+    """
+    return rel_str == item or rel_str.startswith(item + "/")
+
+
 def is_protected(path: str | Path) -> bool:
     """判定目标路径是否落在 ``settings.write_blacklist`` 内。
 
@@ -51,10 +73,10 @@ def is_protected(path: str | Path) -> bool:
     except ValueError:
         return True
     rel_str = rel.as_posix()
-    for item in settings.write_blacklist:
-        if rel_str == item or rel_str.startswith(item + "/"):
-            return True
-    return False
+    # any() 把 "for + if + return True + return False" 折叠成一行:
+    # 任一黑名单项命中 → True;都没命中 → False。控制流等价, 但
+    # 抽掉 for/break/return 的三段嵌套, 阅读时一眼看到"线性: 相对路径 → 任一命中?"
+    return any(_matches_blacklist_item(rel_str, item) for item in settings.write_blacklist)
 
 
 def system_prompt_prefix() -> str:
