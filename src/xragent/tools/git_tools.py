@@ -21,6 +21,21 @@
 ``xragent/turn-*`` tag, 不走网络, tag 从 commit 可恢复 — 不需要 HITL
 审批)。该函数本体已在 ``tests/test_sidegit_cleanup.py`` 锁住,本文件
 只新增包装层 + 1 条工具契约测试。
+
+**v0.5.6 git_commit 异常兜底**:
+  - ``git_commit`` 之前直接 ``sg.add_all_and_commit(message, min_diff_bytes=0)``,
+    没任何异常处理 → ``SideGit`` 抛 ``RuntimeError`` (``.git/`` 损坏 /
+    ``git rev-parse`` 失败) 或 ``FileNotFoundError`` (git 不在 PATH) 时,
+    异常会一路冒泡到 LLM 工具调用方, 把 ReAct 循环打挂。
+  - 修法: 抽 ``_commit_error_dict(exc)`` helper 统一错误 dict 格式,
+    ``git_commit`` 包 ``try/except Exception`` 转 dict。注意:
+      * 错误路径用 ``error`` 键 (与 ``git_push`` 的 ``msg`` 键刻意不同 —
+        ``test_git_tools_commit_error.py`` 锁住的契约), 防止 LLM 把
+        "git 仓库坏了" 误判成 "没有改动 (no_changes=True)"。
+      * 错误路径 4 键: ``{ok, head, no_changes, error}``;成功路径
+        仍 3 键: ``{ok, head, no_changes}`` (test_git_tools.py 锁定)。
+      * 错误消息格式: ``f"{type(e).__name__}: {exc}"`` 与 ``git_push``
+        / ``snapshot_cleanup`` 的诊断字符串风格对齐, 便于 grep 日志。
 """
 from __future__ import annotations
 
@@ -60,6 +75,37 @@ def _resolve_timeout(value: object, *, default: int) -> int:
     return _coerce_int(value, default, min_value=1)
 
 
+def _commit_error_dict(exc: BaseException) -> dict[str, Any]:
+    """``git_commit`` 失败时的标准 4 键错误 dict（v0.5.6 异常兜底契约）。
+
+    与 ``git_push`` / ``snapshot_cleanup`` 的 ``ok=False`` 风格对齐，但**用
+    ``error`` 键而非 ``msg`` 键** —— 这是 LLM 工具契约的一部分
+    (``tests/test_git_tools_commit_error.py`` 锁定, 刻意与 ``msg`` 分歧)。
+
+    ``no_changes=False`` 是关键设计: 防止 LLM 把 "git 仓库坏了" 误判成
+    "没有文件改动 (no_changes=True)" 后静默继续。错误消息格式
+    ``f"{type(exc).__name__}: {exc}"`` 与本文件其他工具的诊断字符串
+    风格一致, 便于统一 grep / 上报。
+
+    Args:
+        exc: ``SideGit.add_all_and_commit`` 抛出的异常 (或任何
+            ``git commit`` 子流程的异常)。
+
+    Returns:
+        严格只含 4 个键的 dict:
+            * ``ok`` (bool): 始终为 False
+            * ``head`` (None): 恒定 None
+            * ``no_changes`` (bool): 始终为 False
+            * ``error`` (str): 异常类名 + 消息, 非空
+    """
+    return {
+        "ok": False,
+        "head": None,
+        "no_changes": False,
+        "error": f"{type(exc).__name__}: {exc}",
+    }
+
+
 def git_commit(message: str) -> dict[str, Any]:
     """Agent 显式调用 git_commit → 必须 commit(即使改动很小)。
 
@@ -73,13 +119,27 @@ def git_commit(message: str) -> dict[str, Any]:
             / 中文 / emoji, 不做引号转义 —— shell=True 的 git 进程会处理。
 
     Returns:
-        严格只含 3 个键的 dict(LLM 工具契约,test_git_tools.py 锁定):
-            * ``ok`` (bool): 始终为 True(底层异常已转成 ``no_changes=True``)
+        成功时严格只含 3 个键的 dict (LLM 工具契约, test_git_tools.py 锁定):
+            * ``ok`` (bool): True
             * ``head`` (str | None): 新 commit 的 sha;无改动时为 None
-            * ``no_changes`` (bool): True 表示本次没有产生 commit(幂等语义)
+            * ``no_changes`` (bool): True 表示本次没有产生 commit (幂等语义)
+
+        **异常兜底 (v0.5.6)**: ``SideGit.add_all_and_commit`` 抛任何
+        ``Exception`` (常见: ``RuntimeError`` —— ``.git/`` 损坏 /
+        ``git rev-parse`` 失败;``FileNotFoundError`` —— git 不在 PATH;
+        ``OSError`` —— 磁盘 IO 错误) 时, 本工具**自身不抛**, 而是返回
+        4 键错误 dict::
+
+            {"ok": False, "head": None, "no_changes": False,
+             "error": "<ExceptionClassName>: <str(exc)>"}
+
+        (与 ``tests/test_git_tools_commit_error.py`` 锁定的契约一致)
     """
     sg = SideGit()
-    head = sg.add_all_and_commit(message, min_diff_bytes=0)
+    try:
+        head = sg.add_all_and_commit(message, min_diff_bytes=0)
+    except Exception as e:  # noqa: BLE001 - 兜底转 dict,与 snapshot_cleanup 风格对齐
+        return _commit_error_dict(e)
     return {"ok": True, "head": head, "no_changes": head is None}
 
 
