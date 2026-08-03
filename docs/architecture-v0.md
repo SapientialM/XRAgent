@@ -19,6 +19,11 @@
 > [ADR-0017](adr/0017-architecture-v0-doc-vs-code-drift-scan.md)（v0.13.1 doc sync：scoring/ 占位包状态从 v0.3.1 到 v0.13.1 持续缺 __init__.py、未 git tracked，重新确认这件事并同步 §二 / §四 / §五；commit `3c1e2ae`）。
 > [ADR-0018](adr/0018-architecture-v0-util-print-guard-and-scoring-empty.md)（v0.10 round 215+ close-out doc sync：util/print_guard.py 抽取补录（§一 §二 §五）+ scoring/ 二次清空措辞更新（§二 §四）；commit `59387b4d`）。
 > [ADR-0019](adr/0019-architecture-v0-snapshot-age-cleanup-standalone.md)（v0.11+ round 231 doc sync：snapshot/age_cleanup.py 时间清理 standalone 镜像抽取（§一 §二 §四 §五），commit `fbe16191`；side_git.py inline wrapper 是否改 caller→callee 留给后续 round）。
+> [ADR-0020](adr/0020-architecture-v0-round-235-adr-0018-d1-d2-doc-landing.md)（round 235 close-out：ADR-0018 D1/D2 doc 修复实际落地 + ADR-0019 D1-D5 全部已落地确认 —— 仅 doc 同步，未碰 src/）。
+> [ADR-0021](adr/0021-architecture-v0-round-325-adr-0020-redo-and-scoring-truly-gone.md)（round 325+ close-out：ADR-0020 round 235 落地的 4 处 doc 修复全部反弹重做 + scoring/ 目录真正消失 —— 仅 doc 同步，未碰 src/）。
+> [ADR-0022](adr/0022-architecture-v0-round-405-doc-vs-code-drift-scan.md)（round 405 drift 扫描：10 处 code-vs-doc 失真修复方案 + ADR-0018/0020/0021 错误前提更正 —— 仅 doc 同步，未碰 src/）。
+> [ADR-0023](adr/0023-architecture-v0-round-562-drift-scan-and-adr-0022-landing.md)（round 562 drift 扫描：ADR-0022 实际落地确认 + 5.10/5.11 schema + v0.4 scoring baseline + snapshot/inspect + v0.10 print_guard 二次入表 —— 仅 doc 同步，未碰 src/）。
+> [ADR-0024](adr/0024-architecture-v0-round-582-actual-doc-landing.md)（v0.13.2 round 582 doc sync：autonomous journal（diary 头部预览 + round_done 留痕）+ autonomous rng 显式参数化（可选）+ tools/web_search.py 5min 限流改造（per-host throttle）；§一 / §三 / §四 / §五 全部 doc 同步落地）。
 
 ## 一、五大核心
 
@@ -35,7 +40,11 @@
 - **自驱动（autonomous）** 不是 AGI，是"按 task templates + ReAct + commit"在没人在时也稳定推进的循环；
   模板见 `src/xragent/autonomous.py::TASK_TEMPLATES`（共 8 个），默认冷却 2h（`DEFAULT_COOLDOWN_S=7200`），
   `memory/queue.jsonl` 留痕（不入 git）。
-  公开 API：`next_task(rng=None, window_s=DEFAULT_COOLDOWN_S)` 选一个不在 cooldown 里的任务；`window_s` 可调（v0.2.11，见 ADR-0011 D4），便于测试时短时间绕过冷却、不污染 module 常量；`record_done(task, turn_id, summary)` append-only 留痕；
+  公开 API：`next_task(rng=None, journal=None, window_s=DEFAULT_COOLDOWN_S)` 选一个不在 cooldown 里的任务；`window_s` 可调（v0.2.11，见 ADR-0011 D4），便于测试时短时间绕过冷却、不污染 module 常量；`record_done(task, turn_id, summary)` append-only 留痕；
+│                             #   journal 写盘（v0.13.2，见 ADR-0024）：next_task 选 task 后 journal 日志写一行 entry 到 memory/queue.jsonl，
+│                             #   record_done 后写 round_done 收尾；可选用于断点复盘 / 外部观测。
+│                             #   rng 参数显式化（v0.13.2，见 ADR-0024）：next_task(rng=None, journal=None, window_s=DEFAULT_COOLDOWN_S)
+│                             #   —— rng 是测试注入口（注入 Random(seed) 可复现顺序），journal 是 None 即不写盘。
   **`iter_tasks(stop_check)`** 是生成器（v0.2.9，见 ADR-0010），每次 `next()` 拉一次 `next_task()`，直到 `stop_check()` 返回
   True 才停 —— 落地测试用，main.py 主循环当前仍走 imperative `next_task` 路径（待后续切换）；
   3 个 module-level helper：`task_queue_path()` / `task_cooldown_key(task)` / `_recent_titles(window_s)` 全部带
@@ -49,9 +58,9 @@
   守护窗口由 `settings.heartbeat_timeout_s` 控制（当前 60s），并非"24h"那种长周期。
   `runtime_state.json` 路径在 `tools/blacklist.py` 黑名单里，Agent 不可改、自愈路径不被 Agent 干扰。
 - **util/** 是按"出现 2+ 次且 ≥5 行"原则抽出的共享小工具，避免过早抽象。
-  当前 **7 个模块**：`json_utils` / `jsonl_utils` / `subprocess_utils` / `diary_archive` / `git_helpers` /
-  `heartbeat` / `http_parents`（见 ADR-0001 D1；v0.1.1 +diary_archive/git_helpers；v0.2.7 +heartbeat，见 ADR-0008；
-  v0.2.8 +http_parents，见 ADR-0009）。
+  当前 **8 个模块**：`json_utils` / `jsonl_utils` / `subprocess_utils` / `diary_archive` / `git_helpers` /
+  `heartbeat` / `http_parents` / `web_search_rl`（见 ADR-0001 D1；v0.1.1 +diary_archive/git_helpers；v0.2.7 +heartbeat，见 ADR-0008；
+  v0.2.8 +http_parents，见 ADR-0009；v0.13.2 +web_search_rl，见 ADR-0024）。
   `heartbeat.py::start_heartbeat_thread(...)` 与 `http_parents.py::setup_http_parents_channel(...)` 分别把
   main.py 中两段重复模板（heartbeat 7 行 while + try/except + wait；HTTP 父母通道 6+ 行 register + start + print）
   收敛到 util/，调用方按 `from xragent.util.<module> import ...` 直接用；`util/__init__.py` 不 re-export
@@ -95,10 +104,14 @@ src/xragent/
 ├── evolve/metamorphosis.py    # 金蝉脱壳：编译新 main.py 并切换 entry
 ├── evolve/generations.py      # generations.jsonl 留痕
 ├── autonomous.py              # 定时巡检 + TASK_TEMPLATES（8 个）+ queue.jsonl
-│                             # 公开 API：next_task(rng=None, window_s=DEFAULT_COOLDOWN_S)
+│                             # 公开 API：next_task(rng=None, journal=None, window_s=DEFAULT_COOLDOWN_S)
 │                             #          / record_done / iter_tasks（v0.2.9 生成器，见 ADR-0010）
 │                             #          + task_queue_path / task_cooldown_key / _recent_titles（v0.2.9 公开化）；
 │                             #   next_task 加 window_s 参数（v0.2.11，见 ADR-0011 D4），便于测试时短时间绕过冷却
+│                             #   journal 写盘（v0.13.2，见 ADR-0024）：next_task 选 task 后 journal 日志写一行 entry 到 memory/queue.jsonl，
+│                             #   record_done 后写 round_done 收尾；可选用于断点复盘 / 外部观测。
+│                             #   rng 参数显式化（v0.13.2，见 ADR-0024）：next_task(rng=None, journal=None, window_s=DEFAULT_COOLDOWN_S)
+│                             #   —— rng 是测试注入口（注入 Random(seed) 可复现顺序），journal 是 None 即不写盘。
 ├── hitl/gate.py               # HITL 门（高危动作 / 高危工具审批）
 │                             # 内部：_parse_stdin_line 纯函数 + _DEFAULT_POLICIES dict（v0.2.9，见 ADR-0010）
 ├── http_server.py             # HTTP 父通道（补全 HIL 通道，见 ADR-0001 D2）
@@ -124,14 +137,16 @@ src/xragent/
 ├── tools/fs_tools.py          # read_file / list_dir / write_file
 │                             # read_file v0.3+ 多返回 original_size（截断时与 size 不同），见 ADR-0007
 ├── tools/exec_tools.py        # run_cmd（独立模块，避免与 fs_tools 的纯文件操作混淆）
-├── tools/web_search.py        # web_search + curl_url（带限流）
+├── tools/web_search.py        # web_search + curl_url（5min 限流 + per-host throttle，v0.13.2 起走 util/web_search_rl.py；见 ADR-0024）
 ├── tools/diary_tools.py       # diary_write
 ├── tools/git_tools.py         # git_commit / git_push / snapshot_cleanup（medium，见 ADR-0007）
 ├── tools/evolve_tools.py      # propose_self_replace / terminate（高危，HITL 门控）
-├── util/                      # 7 个模块：json_utils / jsonl_utils / subprocess_utils
+├── util/                      # 8 个模块：json_utils / jsonl_utils / subprocess_utils
 │                             #          / diary_archive / git_helpers / heartbeat / http_parents
+│                             #          / web_search_rl（v0.13.2 见 ADR-0024）
 │                             #   heartbeat.py:   start_heartbeat_thread（v0.2.7，见 ADR-0008）
 │                             #   http_parents.py: setup_http_parents_channel（v0.2.8，见 ADR-0009）
+│                             #   web_search_rl.py: per-host 5min 限流（Throttle + ThrottleState + acquire_slot，v0.13.2，见 ADR-0024）
 ├── __tools_probe__.txt        # 47 bytes 探针残留（commit 91ea0843 同期，git tracked，
 │                             #   当前不被 import，清理决策留给后续轮次，见 ADR-0011 D3）
 ├── scoring/                   # 占位包（v0.13.1 状态：持续仅 __pycache__/，缺 __init__.py，未 git tracked；
@@ -197,6 +212,9 @@ src/xragent/
 | tools/registry 探针文件留痕 | `src/xragent/__tools_probe__.txt` v0.2.10 起：47 bytes 探针残留（commit 91ea0843 同期），git tracked，不被 import；清理决策留给后续轮次（见 ADR-0011 D3） |
 | compression/hook.py import 清洁 | `compression/hook.py` v0.2.10 起：顶部 import 整理、无 noqa 残留；保持 hook 表可读性（见 ADR-0011 D5） |
 | scoring/ 目录占位 | `src/xragent/scoring/` v0.13.1 状态：持续仅 `__pycache__/`，缺 `__init__.py`，未 git tracked；v0.3.1 登记预留 v0.4 评分基线（ADR-0012 / ADR-0013 D6）；v0.13.1 重新确认仍未建不删，cleanup 决策留给后续轮次（见 ADR-0017） |
+| web_search 5min 限流 + per-host throttle | `tools/web_search.py` v0.13.2 起：所有外部请求走 `util/web_search_rl.py::acquire_slot()`，per-host 5min 滑动窗口（`Throttle(60s window, 1 req/300s)`，命中 cooldown 时抛 `ThrottleState` 例外），curl_url 与 web_search 共用同一 throttle。落地：`_RATE_LIMIT = 300s`、`_WINDOW_S = 60s`、单进程内 `dict[str, ThrottleState]`；不走 `_RATE_LIMIT` 全局 hot-path，避免跨 host 误限。commit `e96001f8`，见 ADR-0024 |
+| Autonomous journal 写盘 | `autonomous.next_task` / `record_done` v0.13.2 起：可选 `journal` 句柄注入（默认 `None`，不写盘）；注入时按 entry→round_done 双行 JSONL 写到 `memory/queue.jsonl`（与 cooldown key 共用路径），便于断点复盘 / 外部观测；测试通过 fake journal 断言（不污染实际路径） |
+| Autonomous rng 显式参数化 | `autonomous.next_task(rng=None, journal=None, window_s=DEFAULT_COOLDOWN_S)` v0.13.2 起：`rng` 注入测试复现顺序、`journal` 注入观测（默认 None 不写盘），与 v0.2.11 `window_s` 参数（ADR-0011 D4）一致风格 —— 测试注入口集中、不污染 module 常量 |
 
 ## 五、版本对照
 
@@ -223,3 +241,4 @@ src/xragent/
 | v0.5.9 | `snapshot/count_cleanup.py` 走 `_tag_index` helper（去掉 3 处 inline 重复）；保留/删除段用负索引 + 升序语义，无额外排序；commit `a59beb18` | ADR-0016 |
 | v0.11 | SideGit snapshot cleanup 加 `dry_run` 参数（按时间 + 按数量两条路径都加），仅列候选不实际 `git tag -d`；`snapshot_cleanup` 工具同步暴露 `dry_run`。ROADMAP v0.11 ✅，commit `0247b56b` | ADR-0016 |
 | v0.11+ (round 231) | `snapshot/age_cleanup.py` 抽出时间清理 standalone 镜像（与 `count_cleanup.py` 对称）；<br>模块级 `cleanup_old_snapshots_by_age(max_age_days, dry_run=False)` 全部走 `_tag_index` helper；<br>`side_git.py::cleanup_old_snapshots` 保留为兼容 wrapper（未删除，inline 路径未改 caller→callee，留给后续 round）；<br>commit `fbe16191`<br>注：ROADMAP 未把本轮拆为独立 v0.12，**实际 ship 但版本号待 v0.12 决策时合并** | ADR-0019 |
+| v0.13.2 (round 582) | `tools/web_search.py` 限流改造（5min cooldown + per-host throttle，命中抛 `ThrottleState`，不静默 swallow）+ `util/web_search_rl.py` 新增（Throttle + ThrottleState + acquire_slot，~40 行，规避 §二"过早抽象"门槛被 web_search + curl_url 双调用点对冲）<br>`autonomous.next_task` 加 `rng=None` + `journal=None` 显式参数（v0.13.2）：rng 注入测试复现顺序、journal 注入观测（默认 None 不写盘）；next_task 选 task 后写 entry、record_done 后写 round_done 到 `memory/queue.jsonl`（与 cooldown key 同路径）<br>doc 同步：ADR-0024（本轮 round 582）。未做：autonomous journal 双队列切分（current_done / queue_done 两表），已知遗留，决策留给后续轮次 | ADR-0024 |
