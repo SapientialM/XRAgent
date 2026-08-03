@@ -16,6 +16,11 @@ v0.4 第一步只需要"一个可解释的启发式"，让 score 从空值变为
 
 - :func:`~xragent.scoring.score.score_turn` —— 给一个 ``TurnRecord`` 算启发式分。
   详见模块 docstring。
+- 评分常量 :data:`SCORE_RANGE` / :data:`SCORE_ERROR` / :data:`SCORE_OK_BASE` /
+  :data:`SCORE_NO_OBSERVATION` / :data:`SCORE_OBSERVATION_FAIL` —— 全部 5 个
+  公开常量在本顶层 re-export，方便上层 watchdog / 长眠判定 import 而不必
+  走 ``from xragent.scoring.score import ...`` 的深层路径（deep import 与
+  模块重命名风险耦合）。
 
 ## 边界
 
@@ -25,11 +30,20 @@ v0.4 第一步只需要"一个可解释的启发式"，让 score 从空值变为
 """
 from __future__ import annotations
 
-from .score import SCORE_ERROR, SCORE_OK_BASE, SCORE_RANGE, score_turn
+from .score import (
+    SCORE_ERROR,
+    SCORE_NO_OBSERVATION,
+    SCORE_OK_BASE,
+    SCORE_OBSERVATION_FAIL,
+    SCORE_RANGE,
+    score_turn,
+)
 
 __all__ = [
     "SCORE_ERROR",
+    "SCORE_NO_OBSERVATION",
     "SCORE_OK_BASE",
+    "SCORE_OBSERVATION_FAIL",
     "SCORE_RANGE",
     "score_turn",
 ]
