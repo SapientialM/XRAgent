@@ -46,7 +46,7 @@ score ∈ ``SCORE_RANGE`` = ``[0.0, 1.0]``，越大越好。
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
     from ..core.turn import TurnRecord
@@ -95,16 +95,51 @@ def _wall_ms_delta(wall_ms: int) -> float:
         return 0.1
     if wall_ms >= _WALL_MS_SLOW:
         return -0.1
-    # 中间区间：从 +0.1 到 -0.1 线性
-    span = _WALL_MS_SLOW - _WALL_MS_FAST
-    progress = (wall_ms - _WALL_MS_FAST) / span  # 0..1
-    return 0.1 + (-0.1 - 0.1) * progress  # 0.1 → -0.1
+    # 中间线性插值（0.1 → -0.1）：t=0 时 +0.1，t=1 时 -0.1；
+    # ``0.1 - 0.2 * t`` 比 ``0.1 + (-0.1 - 0.1) * t`` 少一个 magic number，
+    # 跨过 t=0.5（中点）时刚好归零。
+    t = (wall_ms - _WALL_MS_FAST) / (_WALL_MS_SLOW - _WALL_MS_FAST)
+    return 0.1 - 0.2 * t
 
 
 def _clip(score: float) -> float:
     """裁剪到 :data:`SCORE_RANGE` 并保留 4 位小数（浮点稳定性 + 易读）。"""
     lo, hi = SCORE_RANGE
     return round(max(lo, min(hi, score)), 4)
+
+
+def _base_from_observation(obs: "dict[str, Any] | None") -> float:
+    """从 ``observation`` dict 取基础分（无 dict / 无 ``ok`` 键 = 中性分）。
+
+    抽出此 helper 的两个原因：
+
+      1. ``score_turn`` 主流程原本是 3 层 if/elif/else 嵌套（``obs is None`` →
+         ``ok is True`` → ``ok is False`` → else），读起来要追 4 个分支；
+         抽到 helper 后 ``score_turn`` 只剩 ``base = _base_from_observation(...)``
+         一行线性调用，主流程意图（错误短路 → 基础分 → 效率叠加 → 裁剪）一眼看完。
+      2. ``isinstance(obs, dict)`` 防御性兜底：``record.observation`` 类型
+         注解是 ``dict[str, Any] | None``，但 dataclass 字段没运行时校验，
+         未来如果上游手贱塞了 ``list`` / ``str`` 进 obs，``obs.get("ok")``
+         会抛 ``AttributeError``。提前 ``isinstance`` 检查返回中性分
+         （与 ``obs=None`` 同语义），主函数无需 try/except。
+
+    Args:
+        obs: ``record.observation`` 字段；可能为 ``None`` 或非 dict。
+
+    Returns:
+        ``SCORE_OK_BASE`` / ``SCORE_OBSERVATION_FAIL`` / ``SCORE_NO_OBSERVATION``
+        之一，参见模块顶部表格。
+    """
+    if not isinstance(obs, dict):
+        # None 或非 dict（含上游类型漂移）→ 中性分；等价于"没拿到结果"。
+        return SCORE_NO_OBSERVATION
+    ok = obs.get("ok")
+    if ok is True:
+        return SCORE_OK_BASE
+    if ok is False:
+        return SCORE_OBSERVATION_FAIL
+    # 半结构化 obs（dict 但缺 "ok" 键）→ 中性分。
+    return SCORE_NO_OBSERVATION
 
 
 def score_turn(record: "TurnRecord") -> float:
@@ -143,19 +178,8 @@ def score_turn(record: "TurnRecord") -> float:
     if record.error:
         return SCORE_ERROR
 
-    # 2) 基础分
-    obs = record.observation
-    if obs is None:
-        base: float = SCORE_NO_OBSERVATION
-    else:
-        ok = obs.get("ok")
-        if ok is True:
-            base = SCORE_OK_BASE
-        elif ok is False:
-            base = SCORE_OBSERVATION_FAIL
-        else:
-            # observation 存在但没有 "ok" 键（罕见的半结构化 obs）→ 中性分
-            base = SCORE_NO_OBSERVATION
+    # 2) 基础分（按 observation 的 ok 字段；None/半结构化 obs 走中性）
+    base: float = _base_from_observation(record.observation)
 
     # 3) 效率维度叠加
     score = base + _wall_ms_delta(int(record.wall_ms))
