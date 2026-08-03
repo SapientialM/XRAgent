@@ -109,10 +109,14 @@ def new_turn_id(now: float | None = None) -> str:
             ``NaN`` / ``inf``（边界条件：epoch 秒既不可能为负也不
             可能非有限;早 fail 比静默产生乱码 ID 更安全）。
     """
-    if now is not None:
-        if not math.isfinite(now):
-            raise ValueError(f"now must be finite epoch seconds, got {now}")
-        if now < 0:
-            raise ValueError(f"now must be non-negative epoch seconds, got {now}")
-    t = now if now is not None else time.time()
-    return _format_turn_id(t)
+    # 边界校验 + 默认值赋值压成一条 if/elif/elif 链: 既消除 3 次冗余
+    # ``now is not None`` 重复, 也让控制流呈线性 (None→填默认 / 非有限→raise
+    # / 负数→raise / 通过→格式化), 比原先 ``先校验再三元赋值`` 读起来更顺。
+    # 等价性: 5 种输入组合 (None / 非有限 / 负数 / 0 / 正有限) 与原版行为一致。
+    if now is None:
+        now = time.time()
+    elif not math.isfinite(now):
+        raise ValueError(f"now must be finite epoch seconds, got {now}")
+    elif now < 0:
+        raise ValueError(f"now must be non-negative epoch seconds, got {now}")
+    return _format_turn_id(now)
