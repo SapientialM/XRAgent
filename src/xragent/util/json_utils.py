@@ -19,7 +19,8 @@ def safe_json_loads(text: "str | bytes | None") -> Any | None:
     与直接 ``json.loads`` 的区别：
       * 任何异常（不只 ``JSONDecodeError``）都被吞掉，调用方不用再包 try
       * 失败约定是 ``None``——调用方用 ``is None`` 判断；不要把 ``None`` 当合法 JSON 值用
-      * 输入为 ``None`` 时直接短路返回 ``None``（避免异常机制开销）
+      * 输入为 ``None`` 或空 ``str``/``bytes`` 时直接短路返回 ``None``
+        （避免异常机制开销；空内容频繁出现于 queue.jsonl 末尾 / HTTP 空 body）
 
     返回类型故意保持宽（``Any``），因为调用方通常马上 ``.get(...)``；
     抽到 typed 返回会逼着每个调用方先 cast，得不偿失。
@@ -38,9 +39,16 @@ def safe_json_loads(text: "str | bytes | None") -> Any | None:
         True
         >>> safe_json_loads(b'{"x": 2}')
         {'x': 2}
+        >>> safe_json_loads("") is None
+        True
+        >>> safe_json_loads(b"") is None
+        True
     """
     if text is None:
         # 边界：显式 None → 显式 None；省去 json.loads 抛 TypeError 的开销。
+        return None
+    if isinstance(text, (str, bytes)) and len(text) == 0:
+        # 边界：空 str/bytes 也短路；避免 json.loads 抛 JSONDecodeError 时构造异常对象。
         return None
     try:
         return json.loads(text)
