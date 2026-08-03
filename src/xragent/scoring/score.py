@@ -88,8 +88,13 @@ _WALL_DELTA_FAST: Final[float] = 0.1
 _WALL_DELTA_SLOW: Final[float] = -0.1
 """``wall_ms >= _WALL_MS_SLOW`` 的慢惩罚幅度。"""
 
-_TOKENS_OUT_DELTA: Final[float] = -0.1
-"""``tokens_out > _TOKENS_OUT_HEAVY`` 的重输出惩罚幅度。"""
+_TOKENS_OUT_PENALTY: Final[float] = -0.1
+"""``tokens_out > _TOKENS_OUT_HEAVY`` 的重输出惩罚幅度（单边 penalty，无奖励）。
+
+.. note::
+   原命名 ``_TOKENS_OUT_DELTA`` 暗示可正可负，但本常量语义上是单边惩罚；
+   改名为 ``_PENALTY`` 让意图更明确，避免未来误以为可以对称扩展奖励。
+"""
 
 
 def _wall_ms_delta(wall_ms: int) -> float:
@@ -103,6 +108,10 @@ def _wall_ms_delta(wall_ms: int) -> float:
         :data:`_WALL_DELTA_SLOW`，过 ``(_WALL_MS_FAST + _WALL_MS_SLOW) / 2``
         时正好 ``0``。
     """
+    if wall_ms < 0:
+        # 边界兜底：负 wall_ms（dataclass 字段无运行时校验时上游可能手贱）
+        # 走 0 delta，不触发快奖励，也不参与插值。
+        return 0.0
     if wall_ms <= _WALL_MS_FAST:
         return _WALL_DELTA_FAST
     if wall_ms >= _WALL_MS_SLOW:
@@ -112,6 +121,38 @@ def _wall_ms_delta(wall_ms: int) -> float:
     # 让两个 delta 常量是斜率的唯一来源 —— 后续调参改一处即可。
     t = (wall_ms - _WALL_MS_FAST) / (_WALL_MS_SLOW - _WALL_MS_FAST)
     return _WALL_DELTA_FAST + (_WALL_DELTA_SLOW - _WALL_DELTA_FAST) * t
+
+
+def _tokens_out_delta(tokens_out: int) -> float:
+    """``tokens_out`` 维度的惩罚（单边阈值）。
+
+    行为：
+
+      * ``tokens_out <= _TOKENS_OUT_HEAVY`` → ``0.0`` （不奖不罚）
+      * ``tokens_out > _TOKENS_OUT_HEAVY``  → :data:`_TOKENS_OUT_PENALTY` (-0.1)
+
+    抽成 helper 与 :func:`_wall_ms_delta` 对称：两个效率维度各自一个
+    纯函数，:func:`_efficiency_delta` 负责线性叠加。这样 ``score_turn``
+    主流程只剩"错误短路 → 基础分 → 效率叠加 → 裁剪"四步线性调用。
+    """
+    if tokens_out > _TOKENS_OUT_HEAVY:
+        return _TOKENS_OUT_PENALTY
+    return 0.0
+
+
+def _efficiency_delta(wall_ms: int, tokens_out: int) -> float:
+    """汇总两个效率维度的 delta（线性叠加；与基础分相加再裁剪）。
+
+    抽这个 helper 的两个原因：
+
+      1. ``score_turn`` 主流程原本第 3 步有 wall + tokens 两段独立 if/算术，
+         读起来要在两个常量之间来回跳。抽到 helper 后 ``score_turn`` 一行
+         调用就完成叠加，意图更明显（"基础 + 效率 → 裁剪"）。
+      2. 单测可以分别覆盖 :func:`_wall_ms_delta` 和 :func:`_tokens_out_delta`
+         两个纯函数，避免未来新增效率维度（如 cost_usd / retry_count）时
+         ``score_turn`` 越长越难读。
+    """
+    return _wall_ms_delta(wall_ms) + _tokens_out_delta(tokens_out)
 
 
 def _clip(score: float) -> float:
@@ -193,13 +234,9 @@ def score_turn(record: "TurnRecord") -> float:
     # 2) 基础分（按 observation 的 ok 字段；None/半结构化 obs 走中性）
     base: float = _base_from_observation(record.observation)
 
-    # 3) 效率维度叠加
-    score = base + _wall_ms_delta(int(record.wall_ms))
-    if record.tokens_out > _TOKENS_OUT_HEAVY:
-        score += _TOKENS_OUT_DELTA
-
+    # 3) 效率维度叠加（wall + tokens 两个独立维度的线性叠加）
     # 4) 裁剪 + 浮点稳定
-    return _clip(score)
+    return _clip(base + _efficiency_delta(int(record.wall_ms), int(record.tokens_out)))
 
 
 __all__ = [
