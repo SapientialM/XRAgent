@@ -212,9 +212,14 @@ def next_task(
         选中的任务 dict（来自 :data:`TASK_TEMPLATES`）。
     """
     rng = rng or random
+    # 把 _recent_titles 调用提到 list comp 外：原来每个 candidate 都会
+    # 重新读 queue.jsonl + 解析 + 过滤一遍（O(N) IO，N=TASK_TEMPLATES 当前为 8）。
+    # hoist 成一次 O(M)（M = queue.jsonl 行数）。queue 行多时省显著 IO，
+    # 且语义不变（set 成员查 O(1) 替代原先的"每次重新构造 set"）。
+    recent = _recent_titles(window_s)
     candidates = [
         t for t in TASK_TEMPLATES
-        if task_cooldown_key(t) not in _recent_titles(window_s)
+        if task_cooldown_key(t) not in recent
     ]
     if not candidates:
         # 硬退化：所有模板都还在 cooldown，返回 [0] 让 Agent 自己想办法。
