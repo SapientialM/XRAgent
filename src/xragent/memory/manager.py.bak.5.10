@@ -14,9 +14,7 @@ Schema 版本演进 (按 _migrate_v5X 顺序幂等执行):
     5.9: +idx_facts_tags; +idx_facts_title  (修复 5.7 重构期间因 -456 行删改而
         遗失的索引, 详见 _migrate_v59 docstring)
     5.10: +Fact.expires_ts; +idx_facts_expires_ts (partial);
-        +set_expiry(fact_id, ttl_seconds); +recall_unexpired; +purge_expired;
-        +Fact.access_count; +idx_facts_access_count_ts;
-        +recall_most_accessed / recall_least_accessed / increment_access_count (5.11)
+        +set_expiry(fact_id, ttl_seconds); +recall_unexpired; +purge_expired
         (TTL 语义: expires_ts 为 unix 时间戳, NULL 表示永不过期;
         partial index 只索引 expires_ts IS NOT NULL 的行, 避免大量永不过期
         的 fact 进入索引拖慢写入; purge_expired / recall_unexpired 都按
@@ -33,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
 
-SCHEMA_VERSION = 511  # 5.11
+SCHEMA_VERSION = 510  # 5.10
 
 
 @dataclass
@@ -53,7 +51,6 @@ class Fact:
     confidence: float = 1.0  # 5.7: 0.0~1.0, 越高越可靠
     last_accessed_ts: float = 0.0  # 5.8: LRU 追踪, 默认 0.0; save_fact 时初始化=ts
     expires_ts: Optional[float] = None  # 5.10: TTL 过期 unix 时间戳; None = 永不过期
-    access_count: int = 0  # 5.11: 访问次数, 与 last_accessed_ts 配合做精确 LFU
 
 
 class MemoryManager:
@@ -81,9 +78,7 @@ class MemoryManager:
         -- 5.8: LRU 追踪 (0.0 = 未访问过老行)
         last_accessed_ts REAL NOT NULL DEFAULT 0.0,
         -- 5.10: TTL (NULL = 永不过期, 真实值 = unix 时间戳)
-        expires_ts      REAL,
-        -- 5.11: 访问计数 (LFU 精确化: 新行=0, 每次 recall/touch 累加)
-        access_count    INTEGER NOT NULL DEFAULT 0
+        expires_ts      REAL
     );
     """
 
@@ -108,9 +103,6 @@ class MemoryManager:
         # 都直接走 ORDER BY expires_ts ASC
         "CREATE INDEX IF NOT EXISTS idx_facts_expires_ts "
         "ON facts(expires_ts ASC) WHERE expires_ts IS NOT NULL",
-        # 5.11: LFU 召回最常访问 (DESC 让 ORDER BY access_count DESC 走索引)
-        "CREATE INDEX IF NOT EXISTS idx_facts_access_count_ts "
-        "ON facts(access_count DESC, ts DESC)",
     ]
 
     @staticmethod
@@ -336,7 +328,6 @@ class MemoryManager:
         self._migrate_v58()
         self._migrate_v59()  # 5.9: 恢复 5.4/5.6 时代丢失的索引
         self._migrate_v510()  # 5.10: +expires_ts + TTL 索引 + 3 方法
-        self._migrate_v511()  # 5.11: +access_count + LFU 索引 + 3 recall 方法
 
     # ---- 5.1 ----
     def _migrate_v51(self) -> None:
@@ -487,34 +478,6 @@ class MemoryManager:
                 "ON facts(expires_ts ASC) WHERE expires_ts IS NOT NULL",
             )
 
-    # ---- 5.11 ----
-    def _migrate_v511(self) -> None:
-        """5.10 -> 5.11: facts +access_count (INTEGER DEFAULT 0);
-+idx_facts_access_count_ts.
-
-        access_count 默认 0 — 对历史存量行零侵入 (新写入不再 +1);
-        recall_most_accessed / recall_least_accessed 通过
-        WHERE access_count >= 0 自动覆盖存量行。
-        复合索引 (access_count DESC, ts DESC) 让 ORDER BY 直接走索引,
-        配合 WHERE 过滤 archived=0 时可与 idx_facts_active 共存
-        (SQLite 优化器按 cost 选 plan)。
-
-        三个方法 (recall_most_accessed / recall_least_accessed /
-        increment_access_count) 在类尾部添加, 此处仅做 DDL。
-        """
-        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(facts)").fetchall()}
-        if "access_count" not in cols:
-            with self._lock, self._conn:
-                self._conn.execute(
-                    "ALTER TABLE facts ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0"
-                )
-        with self._lock, self._conn:
-            self._safe_create_index(
-                self._conn,
-                "CREATE INDEX IF NOT EXISTS idx_facts_access_count_ts "
-                "ON facts(access_count DESC, ts DESC)",
-            )
-
     # ---- CRUD ----
 
     def save_fact(
@@ -528,7 +491,6 @@ class MemoryManager:
         title: str = "",
         confidence: float = 1.0,
         expires_ts: Optional[float] = None,  # 5.10: TTL 过期时间 (unix)
-        access_count: int = 0,  # 5.11: 初始访问计数 (默认 0)
     ) -> Fact:
         """落库并返回带 id 的 Fact。"""
         import json as _json
@@ -546,9 +508,8 @@ class MemoryManager:
         with self._lock, self._conn:
             cur = self._conn.execute(
                 "INSERT INTO facts (ts, category, content, source_turn, source_turn_idx, "
-                "tags, priority, title, confidence, last_accessed_ts, expires_ts, "
-                "access_count) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "tags, priority, title, confidence, last_accessed_ts, expires_ts) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     ts,
                     category,
@@ -561,7 +522,6 @@ class MemoryManager:
                     conf,
                     last_access,
                     expires_ts,
-                    access_count,
                 ),
             )
             new_id = cur.lastrowid
@@ -579,7 +539,6 @@ class MemoryManager:
             confidence=conf,
             last_accessed_ts=last_access,
             expires_ts=expires_ts,
-            access_count=access_count,
         )
 
     def _row_to_fact(self, r: sqlite3.Row) -> Fact:
@@ -614,7 +573,6 @@ class MemoryManager:
             confidence=float(r["confidence"]),
             last_accessed_ts=float(r["last_accessed_ts"]),
             expires_ts=r["expires_ts"],
-            access_count=int(r["access_count"]),
         )
 
     def recall(
@@ -998,114 +956,3 @@ class MemoryManager:
                 (now,),
             )
             return cur.rowcount
-
-    # ---- 5.11: LFU (Least/Frequently Used) ----
-    def recall_most_accessed(
-        self,
-        k: int = 10,
-        active_only: bool = True,
-        category: Optional[str] = None,
-    ) -> list[Fact]:
-        """5.11 新方法: 召回访问次数最多的 fact (走 idx_facts_access_count_ts)。
-
-        与 :meth:`recall_lru` (按 last_accessed_ts 排) 互补 ——
-        LRU 区分"最近一次访问", LFU 区分"总访问热度"。两者可结合做
-        复合策略, e.g. ``0.7 * (1 / age) + 0.3 * access_count``。
-
-        Args:
-            k: 返回条数上限, 默认 10。
-            active_only: ``True`` (默认) 时排除 ``archived=1`` 行。
-            category: 可选 category 过滤, ``None`` 不过滤。
-
-        Returns:
-            list[Fact]: 按 ``access_count DESC, ts DESC`` 排序的 Fact 列表;
-            空库或全部过滤掉时返回 ``[]``。新写入行 ``access_count=0`` 也会
-            被召回 (但排在最末尾, 因为 tie 时按 ts DESC)。
-        """
-        sql = "SELECT * FROM facts WHERE access_count >= 0 "
-        params: list = []
-        if active_only:
-            sql += "AND archived = 0 "
-        if category is not None:
-            sql += "AND category = ? "
-            params.append(category)
-        sql += "ORDER BY access_count DESC, ts DESC LIMIT ?"
-        params.append(k)
-        with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
-        return [self._row_to_fact(r) for r in rows]
-
-    def recall_least_accessed(
-        self,
-        k: int = 10,
-        active_only: bool = True,
-        category: Optional[str] = None,
-    ) -> list[Fact]:
-        """5.11 新方法: 召回访问次数最少的 fact (回收候选)。
-
-        用于"冷数据回收" / "为新写入腾空间"策略: 优先 archive / 压缩
-        长期未被访问的行。ORDER BY access_count ASC 让小计数的行排在前,
-        配合 idx_facts_access_count_ts (SQLite 优化器可反向扫描)。
-
-        Args:
-            k: 返回条数上限, 默认 10。
-            active_only: ``True`` (默认) 时排除 ``archived=1`` 行。
-            category: 可选 category 过滤, ``None`` 不过滤。
-
-        Returns:
-            list[Fact]: 按 ``access_count ASC, ts DESC`` 排序的 Fact 列表;
-            空库或全部过滤掉时返回 ``[]``。
-        """
-        sql = "SELECT * FROM facts WHERE access_count >= 0 "
-        params: list = []
-        if active_only:
-            sql += "AND archived = 0 "
-        if category is not None:
-            sql += "AND category = ? "
-            params.append(category)
-        sql += "ORDER BY access_count ASC, ts DESC LIMIT ?"
-        params.append(k)
-        with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
-        return [self._row_to_fact(r) for r in rows]
-
-    def increment_access_count(
-        self,
-        fact_id: int,
-        n: int = 1,
-    ) -> Optional[Fact]:
-        """5.11 新方法: 原子累加 access_count (顺手刷新 last_accessed_ts)。
-
-        与 :meth:`touch_fact` 不同 ——
-        ``touch_fact`` 只刷时间戳不计数; 本方法计数+时间戳都更新, 用于
-        "每次 recall / 命中 都应该被算一次访问"的场景。
-        返回 ``Optional[Fact]`` 与 update_title / update_confidence 一致,
-        区分"不存在 (None)"和"更新成功 (Fact)"。
-
-        Args:
-            fact_id: 主键 id; 不存在 → ``None``。
-            n: 累加值, 默认 1; 传负值表示"撤销访问" (很少用, 但允许)。
-
-        Returns:
-            Optional[Fact]: 更新后的 Fact; ``id`` 不存在 → ``None``。
-        """
-        if n == 0:
-            # 0 = no-op, 仍返回当前 Fact (便于"读"语义)
-            row = self._conn.execute(
-                "SELECT * FROM facts WHERE id = ?", (fact_id,)
-            ).fetchone()
-            return self._row_to_fact(row) if row else None
-        with self._lock, self._conn:
-            now = time.time()
-            cur = self._conn.execute(
-                "UPDATE facts SET access_count = access_count + ?, "
-                "last_accessed_ts = ? WHERE id = ?",
-                (n, now, fact_id),
-            )
-            if cur.rowcount == 0:
-                return None
-            row = self._conn.execute(
-                "SELECT * FROM facts WHERE id = ?", (fact_id,)
-            ).fetchone()
-        return self._row_to_fact(row) if row else None
-

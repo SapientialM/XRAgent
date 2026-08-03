@@ -534,3 +534,133 @@ def test_schema_v57_migration_idempotent(repo_root):
     idx = [r[1] for r in m1._conn.execute("PRAGMA index_list(facts)").fetchall()]
     assert "idx_facts_confidence_ts" in idx
     m1.close()
+
+
+# === 5.11 新方法 + 新字段测试 ===
+
+def test_access_count_field_defaults_to_zero(repo_root):
+    """5.11: Fact.access_count 默认 0, save/recall 持久化。"""
+    m = MemoryManager()
+    f = m.save_fact("note", "新行 access_count")
+    assert f.access_count == 0
+    hits = m.recall("新行 access_count")
+    assert hits and hits[0].access_count == 0
+
+
+def test_increment_access_count_returns_fact_with_new_count(repo_root):
+    """5.11: increment_access_count 默认 +1, 返回更新后 Fact。"""
+    m = MemoryManager()
+    f = m.save_fact("note", "可累加")
+    assert f.access_count == 0
+    after = m.increment_access_count(f.id)
+    assert isinstance(after, Fact)
+    assert after.id == f.id
+    assert after.access_count == 1
+    # 落库后再 recall 也是 1
+    hits = m.recall("可累加")
+    assert hits and hits[0].access_count == 1
+
+
+def test_increment_access_count_custom_n_and_idempotent(repo_root):
+    """5.11: 自定义 n 累加; 同一 id 多次累加。"""
+    m = MemoryManager()
+    f = m.save_fact("note", "n=3")
+    m.increment_access_count(f.id, n=3)
+    assert m.recall("n=3")[0].access_count == 3
+    m.increment_access_count(f.id, n=2)
+    assert m.recall("n=3")[0].access_count == 5
+
+
+def test_increment_access_count_missing_id_returns_none(repo_root):
+    """5.11: 不存在的 id 返回 None, 不抛。"""
+    m = MemoryManager()
+    assert m.increment_access_count(999999) is None
+    assert m.increment_access_count(999999, n=5) is None
+
+
+def test_increment_access_count_zero_is_noop_returning_current(repo_root):
+    """5.11: n=0 时返回当前 Fact 但不修改计数。"""
+    m = MemoryManager()
+    f = m.save_fact("note", "noop test")
+    m.increment_access_count(f.id, n=3)
+    before = m.recall("noop test")[0].access_count
+    after = m.increment_access_count(f.id, n=0)
+    assert after.access_count == before
+    assert after.access_count == 3
+
+
+def test_recall_most_accessed_orders_by_count_desc(repo_root):
+    """5.11: recall_most_accessed 按 access_count DESC 排。"""
+    m = MemoryManager()
+    a = m.save_fact("note", "hot A")
+    b = m.save_fact("note", "hot B")
+    c = m.save_fact("note", "cold C")
+    m.increment_access_count(a.id, n=5)
+    m.increment_access_count(b.id, n=2)
+    # c 不加, 默认 0
+
+    hits = m.recall_most_accessed(k=10)
+    contents = [h.content for h in hits]
+    assert contents.index("hot A") < contents.index("hot B")
+    assert contents.index("hot B") < contents.index("cold C")
+
+
+def test_recall_least_accessed_orders_by_count_asc(repo_root):
+    """5.11: recall_least_accessed 按 access_count ASC 排。"""
+    m = MemoryManager()
+    a = m.save_fact("note", "hot A")
+    c = m.save_fact("note", "cold C")
+    m.increment_access_count(a.id, n=5)
+    # c 不加
+
+    hits = m.recall_least_accessed(k=10)
+    assert hits[0].content == "cold C"
+    assert hits[-1].content == "hot A"
+
+
+def test_recall_access_filters_archived_and_category(repo_root):
+    """5.11: active_only + category 双过滤。"""
+    m = MemoryManager()
+    a = m.save_fact("preference", "p hot")
+    b = m.save_fact("preference", "p cold")
+    c = m.save_fact("history", "h hot")
+    m.increment_access_count(a.id, n=5)
+    m.increment_access_count(b.id, n=0)
+    m.increment_access_count(c.id, n=5)
+    m.archive_fact(b.id)  # p cold archived
+
+    # active + category=preference: 只剩 p hot
+    hits = m.recall_most_accessed(k=10, active_only=True, category="preference")
+    contents = [h.content for h in hits]
+    assert contents == ["p hot"]
+    # active_only=False 应包含 archived
+    hits_all = m.recall_most_accessed(k=10, active_only=False, category="preference")
+    contents_all = {h.content for h in hits_all}
+    assert contents_all == {"p hot", "p cold"}
+
+
+def test_recall_most_accessed_respects_k_limit(repo_root):
+    """5.11: k 限制召回条数。"""
+    m = MemoryManager()
+    for i in range(5):
+        f = m.save_fact("note", f"hot {i}")
+        m.increment_access_count(f.id, n=i + 1)
+    hits = m.recall_most_accessed(k=3)
+    assert len(hits) == 3
+
+
+def test_schema_v511_migration_idempotent(repo_root):
+    """5.11 migration: 反复 init 不破坏, access_count 列不被重复加。"""
+    m1 = MemoryManager()
+    cols1 = [r[1] for r in m1._conn.execute("PRAGMA table_info(facts)").fetchall()]
+    assert "access_count" in cols1
+
+    # 第二次调用不应抛, 也不应再加列
+    m1._migrate_v511()
+    cols2 = [r[1] for r in m1._conn.execute("PRAGMA table_info(facts)").fetchall()]
+    assert cols2.count("access_count") == 1
+
+    # 索引存在
+    idx = [r[1] for r in m1._conn.execute("PRAGMA index_list(facts)").fetchall()]
+    assert "idx_facts_access_count_ts" in idx
+    m1.close()
