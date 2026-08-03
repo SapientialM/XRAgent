@@ -299,6 +299,9 @@ def build_default_registry() -> ToolRegistry:
     add("diary_write", "向 diary/YYYY-MM-DD.md 追加一段（人类可读）。",
         {"type": "object", "properties": {"title": {"type": "string"}, "body": {"type": "string"}}, "required": ["title", "body"]},
         "low", diary_tools.diary_write)
+    add("diary_archive", "把超过 N 周的 daily 日记合并到 diary/archive/{iso_year}-W{iso_week}.md。",
+        {"type": "object", "properties": {"weeks_threshold": {"type": "integer", "default": 8, "description": "N 周前的日记会被归档"}}, "required": []},
+        "low", diary_tools.diary_archive)
     add("propose_self_replace", "金蝉脱壳：commit → push → 编译 → supervisor 切换。需要 HITL 审批。",
         {"type": "object", "properties": {"reason": {"type": "string"}, "entry": {"type": "string", "default": "src/xragent/main.py"}}, "required": ["reason"]},
         "high", evolve_tools.propose_self_replace)

@@ -395,3 +395,19 @@ def test_build_default_registry_specs_risk_matches_tool_kind():
     for n in high_risk:
         assert n in by_name, f"缺工具: {n}"
         assert by_name[n].risk == "high", f"{n} 风险等级应为 high，实际 {by_name[n].risk}"
+
+
+def test_build_default_registry_exposes_diary_archive(repo_root):
+    """diary_archive wrapper 在 diary_tools 里早就实现，但 registry 一直没注册——LLM 看不到。
+    锁住：注册表必须暴露它，且风险等级为 low（归档是可恢复的合并操作）。
+    """
+    r = build_default_registry()
+    names = _core_names(r)
+    assert "diary_archive" in names, "diary_archive 未注册到默认注册表"
+
+    spec = next(s for s in r.specs() if s.name == "diary_archive")
+    assert spec.risk == "low", f"diary_archive 风险等级应为 low，实际 {spec.risk}"
+    schema = spec.input_schema or {}
+    assert "weeks_threshold" in schema.get("properties", {}), (
+        f"schema 应暴露 weeks_threshold，实际: {schema}"
+    )
