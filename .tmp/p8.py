@@ -1,0 +1,11 @@
+#!/usr/bin/env python3.11
+"""Part 8: §五版本对照表补 5 行."""
+from pathlib import Path
+p = Path("docs/architecture-v0.md")
+t = p.read_text(encoding="utf-8")
+old = "| v0.13.2 (round 582) | `tools/web_search.py` 限流改造（5min cooldown + per-host throttle，命中抛 `ThrottleState`，不静默 swallow）+ `util/web_search_rl.py` 新增（Throttle + ThrottleState + acquire_slot，~40 行，规避 §二\"过早抽象\"门槛被 web_search + curl_url 双调用点对冲）<br>`autonomous.next_task` 加 `rng=None` + `journal=None` 显式参数（v0.13.2）：rng 注入测试复现顺序、journal 注入观测（默认 None 不写盘）；next_task 选 task 后写 entry、record_done 后写 round_done 到 `memory/queue.jsonl`（与 cooldown key 同路径）<br>doc 同步：ADR-0024（本轮 round 582）。未做：autonomous journal 双队列切分（current_done / queue_done 两表），已知遗留，决策留给后续轮次 | ADR-0024 |\n"
+new = old + "| v0.10 (round 215+) | `util/print_guard.py` 抽取：把 main.py `cmd_autonomous` 里 3 处 `try/except Exception + print(f\"{label} failed: ...\")` 模板抽到 `print_guard(label, fn, *args, **kwargs)`；调用方按 `from xragent.util.print_guard import print_guard` 直接用（commit `59387b4d` 链）。注：本轮 round 588 ADR-0025 把 v0.10 print_guard 增量补入 §五版本表 | ADR-0018 / ADR-0025 |\n| v0.4 (round 425) | scoring/ v0.4 baseline 已 ship：启发式 `score_turn(TurnRecord) -> float` + 3 常量 (`SCORE_ERROR` / `SCORE_OK_BASE` / `SCORE_RANGE`)；`scoring/__init__.py` re-export + `scoring/score.py` 实现（git tracked，commit `8125486d`）；后续 `a1d51ee2 refactor(scoring)` 抽 `_base_from_observation` helper + 简化 wall_ms 插值。注：ROADMAP.md v0.4 节仍写「计划」属 ROADMAP drift | ADR-0025 |\n| v0.5.10 | memory schema 5.10：facts +`expires_ts`（TTL 用）+ TTL 索引 + 3 方法 `recall_unexpired()` / `purge_expired()` / `set_ttl()`。`_migrate_v510()` 在 manager.py line 338 跑 | ADR-0025 |\n| v0.5.11 | memory schema 5.11：facts +`access_count INTEGER NOT NULL DEFAULT 0`（line 86）+ `idx_facts_access_count_ts` 索引（line 111-113）+ 3 LFU 方法 `recall_most_accessed` / `recall_least_accessed` / `increment_access_count`。`Fact.access_count: int = 0`（line 56）。`SCHEMA_VERSION` bump 58 → 511 | ADR-0025 |\n| v0.5.x (round 421) | `snapshot/inspect.py` 新增：snapshot tag 检视工具（与 `_tag_index` 共享原语）。commit `467bf563 autonomous: 加新功能小而具体 (round 421)` | ADR-0025 |\n"
+assert old in t, "D5 old not found"
+t = t.replace(old, new, 1)
+p.write_text(t, encoding="utf-8")
+print("D5 §五补 5 行 OK")
