@@ -80,26 +80,38 @@ _WALL_MS_SLOW: Final[int] = 30_000
 _TOKENS_OUT_HEAVY: Final[int] = 2_000
 """``tokens_out`` 超过此值给 ``-0.1`` 惩罚（鼓励简洁）。"""
 
+# ---- 效率奖励/惩罚幅度（v0.4 基线；抽常量便于上层调参/复用）----------------
+
+_WALL_DELTA_FAST: Final[float] = 0.1
+"""``wall_ms <= _WALL_MS_FAST`` 的快奖励幅度。"""
+
+_WALL_DELTA_SLOW: Final[float] = -0.1
+"""``wall_ms >= _WALL_MS_SLOW`` 的慢惩罚幅度。"""
+
+_TOKENS_OUT_DELTA: Final[float] = -0.1
+"""``tokens_out > _TOKENS_OUT_HEAVY`` 的重输出惩罚幅度。"""
+
 
 def _wall_ms_delta(wall_ms: int) -> float:
     """``wall_ms`` 维度的奖励/惩罚（区间线性插值）。
 
     行为：
 
-      * ``wall_ms <= _WALL_MS_FAST`` → ``+0.1``
-      * ``wall_ms >= _WALL_MS_SLOW`` → ``-0.1``
-      * 中间区间 → 从 ``+0.1`` 线性衰减到 ``-0.1``，过 ``(_WALL_MS_FAST + _WALL_MS_SLOW) / 2``
+      * ``wall_ms <= _WALL_MS_FAST`` → :data:`_WALL_DELTA_FAST` (+0.1)
+      * ``wall_ms >= _WALL_MS_SLOW`` → :data:`_WALL_DELTA_SLOW` (-0.1)
+      * 中间区间 → 从 :data:`_WALL_DELTA_FAST` 线性衰减到
+        :data:`_WALL_DELTA_SLOW`，过 ``(_WALL_MS_FAST + _WALL_MS_SLOW) / 2``
         时正好 ``0``。
     """
     if wall_ms <= _WALL_MS_FAST:
-        return 0.1
+        return _WALL_DELTA_FAST
     if wall_ms >= _WALL_MS_SLOW:
-        return -0.1
-    # 中间线性插值（0.1 → -0.1）：t=0 时 +0.1，t=1 时 -0.1；
-    # ``0.1 - 0.2 * t`` 比 ``0.1 + (-0.1 - 0.1) * t`` 少一个 magic number，
-    # 跨过 t=0.5（中点）时刚好归零。
+        return _WALL_DELTA_SLOW
+    # 中间线性插值：从 +0.1 线性衰减到 -0.1；斜率由两端 delta 派生
+    # (``_WALL_DELTA_SLOW - _WALL_DELTA_FAST``), 不写魔法数字 0.2,
+    # 让两个 delta 常量是斜率的唯一来源 —— 后续调参改一处即可。
     t = (wall_ms - _WALL_MS_FAST) / (_WALL_MS_SLOW - _WALL_MS_FAST)
-    return 0.1 - 0.2 * t
+    return _WALL_DELTA_FAST + (_WALL_DELTA_SLOW - _WALL_DELTA_FAST) * t
 
 
 def _clip(score: float) -> float:
@@ -184,7 +196,7 @@ def score_turn(record: "TurnRecord") -> float:
     # 3) 效率维度叠加
     score = base + _wall_ms_delta(int(record.wall_ms))
     if record.tokens_out > _TOKENS_OUT_HEAVY:
-        score -= 0.1
+        score += _TOKENS_OUT_DELTA
 
     # 4) 裁剪 + 浮点稳定
     return _clip(score)
