@@ -11,6 +11,14 @@ Schema 版本演进 (按 _migrate_v5X 顺序幂等执行):
     5.8: +Fact.last_accessed_ts; +idx_facts_last_accessed_ts; +touch_fact; +recall_lru
         (LRU 追踪: save_fact 时初始化=ts, touch_fact 时刷新为当前时间,
         recall_lru 按 last_accessed_ts ASC 召回最久未访问的事实)
+    5.9: +idx_facts_tags; +idx_facts_title  (修复 5.7 重构期间因 -456 行删改而
+        遗失的索引, 详见 _migrate_v59 docstring)
+    5.10: +Fact.expires_ts; +idx_facts_expires_ts (partial);
+        +set_expiry(fact_id, ttl_seconds); +recall_unexpired; +purge_expired
+        (TTL 语义: expires_ts 为 unix 时间戳, NULL 表示永不过期;
+        partial index 只索引 expires_ts IS NOT NULL 的行, 避免大量永不过期
+        的 fact 进入索引拖慢写入; purge_expired / recall_unexpired 都按
+        expires_ts < now() / expires_ts >= now() 过滤)
 
 新版本字段/方法请同步追加到顶部注释, 并写 _migrate_v5X(no-op on 已有列)。
 """
@@ -23,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
 
-SCHEMA_VERSION = 58  # 5.8
+SCHEMA_VERSION = 510  # 5.10
 
 
 @dataclass
@@ -42,6 +50,7 @@ class Fact:
     title: str = ""  # 5.6: 短标题, 默认空串
     confidence: float = 1.0  # 5.7: 0.0~1.0, 越高越可靠
     last_accessed_ts: float = 0.0  # 5.8: LRU 追踪, 默认 0.0; save_fact 时初始化=ts
+    expires_ts: Optional[float] = None  # 5.10: TTL 过期 unix 时间戳; None = 永不过期
 
 
 class MemoryManager:
@@ -67,7 +76,9 @@ class MemoryManager:
         -- 5.7
         confidence      REAL NOT NULL DEFAULT 1.0,
         -- 5.8: LRU 追踪 (0.0 = 未访问过老行)
-        last_accessed_ts REAL NOT NULL DEFAULT 0.0
+        last_accessed_ts REAL NOT NULL DEFAULT 0.0,
+        -- 5.10: TTL (NULL = 永不过期, 真实值 = unix 时间戳)
+        expires_ts      REAL
     );
     """
 
@@ -87,6 +98,11 @@ class MemoryManager:
         # 5.8: LRU 召回最久未访问; ASC 让 ORDER BY last_accessed_ts ASC 直接走索引
         "CREATE INDEX IF NOT EXISTS idx_facts_last_accessed_ts "
         "ON facts(last_accessed_ts ASC)",
+        # 5.10: TTL partial index — 只索引 expires_ts IS NOT NULL 的行,
+        # 大量永不过期 fact 不会进索引拖慢写入; purge_expired / recall_unexpired
+        # 都直接走 ORDER BY expires_ts ASC
+        "CREATE INDEX IF NOT EXISTS idx_facts_expires_ts "
+        "ON facts(expires_ts ASC) WHERE expires_ts IS NOT NULL",
     ]
 
     @staticmethod
@@ -311,6 +327,7 @@ class MemoryManager:
         self._migrate_v57()
         self._migrate_v58()
         self._migrate_v59()  # 5.9: 恢复 5.4/5.6 时代丢失的索引
+        self._migrate_v510()  # 5.10: +expires_ts + TTL 索引 + 3 方法
 
     # ---- 5.1 ----
     def _migrate_v51(self) -> None:
@@ -437,6 +454,30 @@ class MemoryManager:
             self._safe_create_index(self._conn, "CREATE INDEX IF NOT EXISTS idx_facts_tags ON facts(tags)")
             self._safe_create_index(self._conn, "CREATE INDEX IF NOT EXISTS idx_facts_title ON facts(title)")
 
+    # ---- 5.10 ----
+    def _migrate_v510(self) -> None:
+        """5.9 -> 5.10: facts +expires_ts (REAL NULL); +idx_facts_expires_ts (partial).
+
+        新列 expires_ts 默认 NULL — 等价于"永不过期", 对历史存量行零侵入。
+        partial index 仅覆盖 expires_ts IS NOT NULL 的行, 避免"绝大多数 fact
+        永不过期"场景下索引体积过大; purge_expired / recall_unexpired 都走
+        WHERE expires_ts < now() 或 WHERE expires_ts >= now() 配合 ORDER BY
+        expires_ts ASC, partial index 会自动启用 (SQLite 优化器识别 WHERE
+        谓词与 partial index 谓词匹配时直接走索引)。
+
+        三方法在类尾部添加, 此处仅做 DDL。
+        """
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(facts)").fetchall()}
+        if "expires_ts" not in cols:
+            with self._lock, self._conn:
+                self._conn.execute("ALTER TABLE facts ADD COLUMN expires_ts REAL")
+        with self._lock, self._conn:
+            self._safe_create_index(
+                self._conn,
+                "CREATE INDEX IF NOT EXISTS idx_facts_expires_ts "
+                "ON facts(expires_ts ASC) WHERE expires_ts IS NOT NULL",
+            )
+
     # ---- CRUD ----
 
     def save_fact(
@@ -449,6 +490,7 @@ class MemoryManager:
         priority: int = 0,
         title: str = "",
         confidence: float = 1.0,
+        expires_ts: Optional[float] = None,  # 5.10: TTL 过期时间 (unix)
     ) -> Fact:
         """落库并返回带 id 的 Fact。"""
         import json as _json
@@ -466,8 +508,8 @@ class MemoryManager:
         with self._lock, self._conn:
             cur = self._conn.execute(
                 "INSERT INTO facts (ts, category, content, source_turn, source_turn_idx, "
-                "tags, priority, title, confidence, last_accessed_ts) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "tags, priority, title, confidence, last_accessed_ts, expires_ts) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     ts,
                     category,
@@ -479,6 +521,7 @@ class MemoryManager:
                     title_eff,
                     conf,
                     last_access,
+                    expires_ts,
                 ),
             )
             new_id = cur.lastrowid
@@ -495,6 +538,7 @@ class MemoryManager:
             title=title_eff,
             confidence=conf,
             last_accessed_ts=last_access,
+            expires_ts=expires_ts,
         )
 
     def _row_to_fact(self, r: sqlite3.Row) -> Fact:
@@ -528,6 +572,7 @@ class MemoryManager:
             title=r["title"],
             confidence=float(r["confidence"]),
             last_accessed_ts=float(r["last_accessed_ts"]),
+            expires_ts=r["expires_ts"],
         )
 
     def recall(
@@ -800,3 +845,114 @@ class MemoryManager:
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_fact(r) for r in rows]
+
+
+    # ---- 5.10: TTL ----
+
+    def set_expiry(
+        self,
+        fact_id: int,
+        ttl_seconds: float,
+    ) -> Optional[Fact]:
+        """5.10 新方法: 设置某条 fact 的 TTL, 返回更新后 Fact; id 不存在 → None。
+
+        TTL 语义:
+          * ``ttl_seconds > 0``  →  expires_ts = now + ttl_seconds
+          * ``ttl_seconds <= 0`` →  expires_ts = NULL (永不过期, 即清除过期)
+
+        与 :meth:`update_confidence` / :meth:`update_title` 返回类型对齐,
+        都是 ``UPDATE + SELECT 回读完整 Fact``, 调用方拿到快照避免二次 recall。
+
+        索引: ``set_expiry`` 改 expires_ts 后 partial index idx_facts_expires_ts
+        会自动同步 (SQLite 在 UPDATE 时维护 partial index 谓词匹配的行)。
+
+        Args:
+            fact_id: 主键 id。
+            ttl_seconds: 相对秒数; ``<= 0`` 表示清除过期 (``expires_ts=NULL``)。
+
+        Returns:
+            更新后的 :class:`Fact`; id 不存在时 ``None``。
+        """
+        if ttl_seconds and ttl_seconds > 0:
+            new_expires = time.time() + float(ttl_seconds)
+        else:
+            new_expires = None
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "UPDATE facts SET expires_ts = ? WHERE id = ?",
+                (new_expires, fact_id),
+            )
+            if cur.rowcount == 0:
+                return None
+            row = self._conn.execute(
+                "SELECT * FROM facts WHERE id = ?", (fact_id,)
+            ).fetchone()
+        return self._row_to_fact(row) if row else None
+
+    def recall_unexpired(
+        self,
+        query: str = "",
+        k: int = 5,
+        category: Optional[str] = None,
+    ) -> list[Fact]:
+        """5.10 新方法: 召回未过期 fact (走 idx_facts_expires_ts partial)。
+
+        过滤条件:
+          * ``archived = 0`` (与 :meth:`recall_active` 行为对齐)
+          * ``(expires_ts IS NULL) OR (expires_ts >= now)``
+
+        永不过期 (expires_ts IS NULL) 的 fact 永远纳入; 过期 fact
+        (expires_ts < now) 排除 — 这与 ``archived`` 概念正交, 用户主动
+        删过期 fact 走 :meth:`purge_expired`。
+
+        Args:
+            query: 可选 content LIKE 过滤; 空串不过滤。
+            k: 返回条数上限, 默认 5。
+            category: 可选 category 过滤; None 跨类。
+
+        Returns:
+            按 ts DESC 排序的未过期 Fact 列表。
+        """
+        now = time.time()
+        sql = (
+            "SELECT * FROM facts WHERE archived = 0 "
+            "AND (expires_ts IS NULL OR expires_ts >= ?)"
+        )
+        params: list = [now]
+        if query:
+            sql += " AND content LIKE ?"
+            params.append(f"%{query}%")
+        if category:
+            sql += " AND category = ?"
+            params.append(category)
+        sql += " ORDER BY ts DESC LIMIT ?"
+        params.append(k)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [self._row_to_fact(r) for r in rows]
+
+    def purge_expired(self, now: Optional[float] = None) -> int:
+        """5.10 新方法: 删除所有已过期 fact (expires_ts < now 且非 NULL)。
+
+        走 partial index idx_facts_expires_ts — WHERE expires_ts IS NOT NULL
+        谓词与 partial index 谓词一致, SQLite 直接走索引扫描, 不需要全表。
+
+        ``now`` 参数为可注入测试时间点; ``None`` 时取 ``time.time()``。
+        ``archived`` 状态不影响本方法 — 即便 archived=1 的过期 fact 也一并删
+        (归档与过期是两个正交维度, 归档只是"软删除", 过期才是真正可回收)。
+
+        Args:
+            now: 参考时间戳 (unix); ``None`` = ``time.time()``。
+                主要用于测试 (把过期阈值往前调验证已过期行被清掉)。
+
+        Returns:
+            int: 被删除的行数 (rowcount)。
+        """
+        if now is None:
+            now = time.time()
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM facts WHERE expires_ts IS NOT NULL AND expires_ts < ?",
+                (now,),
+            )
+            return cur.rowcount
