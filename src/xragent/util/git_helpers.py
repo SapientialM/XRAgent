@@ -39,6 +39,17 @@
     ``str(exc).strip()``, 但极端情况下若 str(e) 为空, 旧消息会变成
     ``"git X 失败: "`` 末尾空;加 ``err or f"rc={rc}"`` 让 caller 至少能看到
     returncode 这一信息维度。
+
+**v0.5.8 follow-up**: ``git_count_ahead`` 再缩一层.
+
+  - 原版本是 ``if rc != 0: return 0`` + ``if not out: return 0`` 两个相邻早返,
+    视觉上像在描述两种不同失败路径, 但语义都是"前置条件不满足 → 0", 合并成
+    单个 ``if rc != 0 or not out: return 0`` 让流程更线性 (前置条件未满足 → 早返;
+    否则才尝试 ``int(out)``);5 种输入组合 (``rc != 0/out=""``/``rc != 0/out=非空``/
+    ``rc == 0/out=""``/``rc == 0/out=数字``/``rc == 0/out=非数字``) 与合并前等价。
+  - ``except ValueError`` 的注释从"理论上不会发生"改成"防御性兜底", 强调它
+    守护的是 caller (``main.py::maybe_periodic_push``) 的 push 节奏不被
+    异常打断, 而非 git 协议本身;语义微调让新读者不会误以为这条分支可删。
 """
 from __future__ import annotations
 
@@ -107,18 +118,19 @@ def git_count_ahead(
     rc, out, _ = run_capture(
         ["git", "rev-list", "--count", f"{base}..{head}"], cwd=cwd, timeout=timeout
     )
-    if rc != 0:
-        return 0
-    if not out:
-        # 边界: 空 stdout 等同"无 ahead", 避免 ``int("")`` 走 ValueError 兜底路径。
-        # 旧写法 ``int(out or 0)`` 能工作但语义隐晦 (读者猜 "or 0" 是防 None?);
-        # 显式早返让意图清晰。
+    # 把"rc != 0 (run_capture 失败)"与"out 空 (无 ahead)"两个相邻早返合并:
+    # 两者语义都是"前置条件不满足 → 0", 拆成两段 if 在视觉上像两种不同失败,
+    # 但控制流完全等价;``or`` 让单行 ``if`` 把意图压成线性 (前置条件 → 早返;
+    # 否则才尝试 ``int(out)``), 5 种输入组合均与合并前行为一致。
+    if rc != 0 or not out:
         return 0
     try:
         return int(out)
     except ValueError:
-        # 极端情况: git 输出了非数字 (e.g. "fatal: ...") 但 rc 仍 = 0? 理论上不会,
-        # 但保险起见不要把 caller 弄崩
+        # 防御性兜底: git 理论上 rc=0 时只输出数字, 但 ``str(out)`` 若含
+        # "fatal: ..." 仍会让 int() 抛 ValueError。这里吞掉避免
+        # ``main.py::maybe_periodic_push`` 的 push 节奏被异常打断
+        # (pusher 是 background 线程, 一次崩溃不应影响下一次扫描)。
         return 0
 
 
