@@ -1,6 +1,7 @@
 """极简 HTTP 父母通道（可选）。"""
 from __future__ import annotations
 
+import hmac
 import json
 import queue
 import threading
@@ -206,7 +207,9 @@ def _make_handler(token: str) -> type:
             """
             if not token:
                 return True
-            return self.headers.get("Authorization", "") == f"Bearer {token}"
+            expected = f"Bearer {token}"
+            actual = self.headers.get("Authorization", "")
+            return hmac.compare_digest(expected, actual)
 
         def _auth_gate(self) -> bool:
             """统一 token 鉴权入口；未通过时已发 401，调用方直接 return。
