@@ -17,6 +17,16 @@ from typing import Callable, TypeVar
 T = TypeVar("T")
 
 
+def _format_failure_message(prefix: str, label: str, exc: BaseException) -> str:
+    """构造 ``[{prefix}] {label} failed: <exc>`` 失败日志。
+
+    集中一处便于维护：``tests/test_print_guard.py::test_prints_failure_with_default_prefix``
+    与 ``test_prints_failure_with_custom_prefix`` 锁定该格式；将来要把失败事件改成
+    结构化日志（JSON / telemetry）只需改这一处而不是 grep 整个仓库。
+    """
+    return f"[{prefix}] {label} failed: {exc}"
+
+
 def print_guard(label: str, fn: Callable[[], T], *, prefix: str = "autonomous") -> T | None:
     """Run ``fn()``；异常时以 ``[prefix] {label} failed: {e}`` 形式 print 到 stdout。
 
@@ -35,9 +45,17 @@ def print_guard(label: str, fn: Callable[[], T], *, prefix: str = "autonomous") 
         → 跳过 commit-only 副作用但仍 ``record_done``；push 失败 → 跳过
         ``last_push_ts = now``。强行返回 fallback 反而要求调用方检查"是 fn 真
         返回还是 guard 兜的"，徒增分支。
+
+        **只吞 Exception**：``KeyboardInterrupt`` / ``SystemExit`` 是
+        ``BaseException`` 直接子类，向上冒泡，保证 SIGINT 与 ``sys.exit()`` 不被
+        guard 吃掉。``test_does_not_swallow_keyboard_interrupt`` /
+        ``test_does_not_swallow_system_exit`` 锁此边界。
     """
     try:
         return fn()
     except Exception as e:
-        print(f"[{prefix}] {label} failed: {e}", flush=True)
+        print(_format_failure_message(prefix, label, e), flush=True)
         return None
+
+
+__all__ = ["print_guard"]
