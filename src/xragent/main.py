@@ -21,6 +21,7 @@ from .hitl.gate import HitlGate
 from .memory.manager import MemoryManager
 from .tools.registry import build_default_registry
 from .util.heartbeat import start_heartbeat_thread
+from .util.print_guard import print_guard
 from .util.subprocess_utils import run_capture
 from .watchdog import runtime_state as rs
 
@@ -335,15 +336,20 @@ def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
         if n == 0:
             last_push_ts = now
             return
-        try:
+        def _do_push() -> None:
+            """执行 sg.push() 并打 result 行；成功/失败都更新 ``last_push_ts``。
+
+            抽到 helper 是为了让 :func:`print_guard` 能包整段；异常时 guard
+            不更新 ``last_push_ts``（失败不该把时钟往前推）。
+            """
             ok, msg = sg.push()
             if ok:
                 print(f"[autonomous] pushed {n} commit(s) to origin/main", flush=True)
             else:
                 print(f"[autonomous] push returned ok=False: {msg[:200]}", flush=True)
             last_push_ts = now
-        except Exception as e:
-            print(f"[autonomous] push failed: {e}", flush=True)
+
+        print_guard("push", _do_push)
 
     try:
         while not stop["v"]:
@@ -351,10 +357,10 @@ def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
             if max_rounds and rounds > max_rounds:
                 print(f"[autonomous] reached max_rounds={max_rounds}", flush=True)
                 break
-            try:
-                task = next_task()
-            except Exception as e:
-                print(f"[autonomous] task gen error: {e}; sleep 60s", flush=True)
+            # task gen 失败 -> guard 返 None -> sleep 60s + continue；
+            # 异常信息现在由 print_guard 统一打（"task gen failed: ..."）
+            task = print_guard("task gen", next_task)
+            if task is None:
                 time.sleep(60)
                 continue
 
@@ -369,14 +375,15 @@ def cmd_autonomous(interval_s: int = 30, max_rounds: int = 0) -> int:
                 out = {"turn_id": "n/a", "answer": "", "actions": [], "error": str(e), "wall_ms": 0}
                 summary = f"exception: {e}"
 
-            try:
-                head = sg.add_all_and_commit(f"autonomous: {task['title'][:60]} (round {rounds})")
-                if head:
-                    print(f"[autonomous] committed {head[:8]}", flush=True)
-                    # 第一次 commit 后立即 push；之后每 push_interval_minutes
-                    maybe_periodic_push(force=(last_push_ts == 0.0))
-            except Exception as e:
-                print(f"[autonomous] commit failed: {e}", flush=True)
+            # commit 失败 -> guard 返 None -> if head 为 False 跳过 push
+            head = print_guard(
+                "commit",
+                lambda: sg.add_all_and_commit(f"autonomous: {task['title'][:60]} (round {rounds})"),
+            )
+            if head:
+                print(f"[autonomous] committed {head[:8]}", flush=True)
+                # 第一次 commit 后立即 push；之后每 push_interval_minutes
+                maybe_periodic_push(force=(last_push_ts == 0.0))
 
             record_done(task, out.get("turn_id", "n/a"), summary)
             print(f"[autonomous] done in {out.get('wall_ms', 0)}ms; sleep {interval_s}s", flush=True)
