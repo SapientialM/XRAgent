@@ -24,6 +24,8 @@
 > [ADR-0022](adr/0022-architecture-v0-round-405-doc-vs-code-drift-scan.md)（round 405 drift 扫描：10 处 code-vs-doc 失真修复方案 + ADR-0018/0020/0021 错误前提更正 —— 仅 doc 同步，未碰 src/）。
 > [ADR-0023](adr/0023-architecture-v0-round-562-drift-scan-and-adr-0022-landing.md)（round 562 drift 扫描：ADR-0022 实际落地确认 + 5.10/5.11 schema + v0.4 scoring baseline + snapshot/inspect + v0.10 print_guard 二次入表 —— 仅 doc 同步，未碰 src/）。
 > [ADR-0024](adr/0024-architecture-v0-round-582-actual-doc-landing.md)（v0.13.2 round 582 doc sync：autonomous journal（diary 头部预览 + round_done 留痕）+ autonomous rng 显式参数化（可选）+ tools/web_search.py 5min 限流改造（per-host throttle）；§一 / §三 / §四 / §五 全部 doc 同步落地）。
+> [ADR-0025](adr/0025-architecture-v0-round-588-drift-scan-design.md)（round 588 drift 扫描设计：列出 10 项 code-vs-doc 失真 A1-A3/B1-B2/C1-C2 + 7 项修复方案 D1-D7 —— 仅 doc 同步设计，未落地）。
+> [ADR-0026](adr/0026-architecture-v0-round-635-adr-0025-actual-landing.md)（round 635 close-out：实际落地 ADR-0025 D1-D7 + D2' print_guard 二次入表 —— 仅 doc 同步，未碰 src/）。
 
 ## 一、五大核心
 
@@ -32,7 +34,7 @@
 | 梦想 | `AGENTS.md` + `core/dream.py` + `core/react_loop.py`（ReAct 主循环）+ `core/backend.py`（LLM 适配） |
 | 父母 | `hitl/gate.py` + `http_server.py` |
 | 生活 | `tools/blacklist.py`（仓库根路径围栏 + 黑名单） |
-| 记忆 | `memory/manager.py` + `core/turn.py` + `snapshot/side_git.py`（v0.2+ 含 cleanup 入口，见 ADR-0003）<br>+ `snapshot/_tag_index.py`（v0.5.x 共享原语，见 ADR-0016）+ `snapshot/count_cleanup.py`（v0.11 数量兜底，见 ADR-0016）<br>+ `snapshot/age_cleanup.py`（v0.11+ 时间清理 standalone 镜像，与 `count_cleanup.py` 对称，见 ADR-0019）<br>`memory/manager.py` 当前有效 schema **5.9**（5.0 基线 + 5.1 `source_turn_idx` + 5.3 `priority` + 5.4 `idx_facts_tags`（v0.5 5.9 二次回填）+ 5.5 `archived` + 5.6 `title` + 5.7 `confidence` + 5.8 `last_accessed_ts` LRU + 5.9 `idx_facts_title` 重建 + 5.4 `idx_facts_tags` 重建），基线见 ADR-0004，5.8 LRU 增量见 ADR-0008，5.9 索引回填见 ADR-0014<br>注：常量 `SCHEMA_VERSION = 58` 未 bump 是已知遗留（5.9 migration 是 DDL-only 的二次回填，不改字段），有效口径以 `_migrate_all()` 实际跑到的最后一个版本为准 |
+| 记忆 | `memory/manager.py` + `core/turn.py` + `snapshot/side_git.py`（v0.2+ 含 cleanup 入口，见 ADR-0003）<br>+ `snapshot/_tag_index.py`（v0.5.x 共享原语，见 ADR-0016）+ `snapshot/count_cleanup.py`（v0.11 数量兜底，见 ADR-0016）<br>+ `snapshot/age_cleanup.py`（v0.11+ 时间清理 standalone 镜像，与 `count_cleanup.py` 对称，见 ADR-0019）<br>`memory/manager.py` 当前有效 schema **5.11**（5.0 基线 + 5.1 `source_turn_idx` + 5.3 `priority` + 5.4 `idx_facts_tags`（v0.5 5.9 二次回填）+ 5.5 `archived` + 5.6 `title` + 5.7 `confidence` + 5.8 `last_accessed_ts` LRU + 5.9 `idx_facts_title` 重建 + 5.4 `idx_facts_tags` 重建 + 5.10 `expires_ts` TTL（commit `cb13c186`，见 ADR-0025 A1）+ 5.11 `access_count` LFU（commit `cb13c186`，见 ADR-0025 A1）），基线见 ADR-0004，5.8 LRU 增量见 ADR-0008，5.9 索引回填见 ADR-0014，5.10/5.11 schema 实际落地见 ADR-0025 + ADR-0026<br>常量 `SCHEMA_VERSION = 511  # 5.11`（commit `cb13c186` 已 bump，与 `_migrate_v510()` / `_migrate_v511()` 同步；5.10/5.11 增量字段 `expires_ts` / `access_count` 与 schema 版本号一致），有效口径以 `_migrate_all()` 实际跑到的最后一个版本为准 |
 | 成长 | `evolve/metamorphosis.py` + `evolve/generations.py` + `autonomous.py`（自驱动循环）<br>+ `watchdog/supervisor.py`（子进程异常自愈）+ `watchdog/runtime_state.py`（心跳文件，见 ADR-0005/0006） |
 
 补充说明：
@@ -58,9 +60,9 @@
   守护窗口由 `settings.heartbeat_timeout_s` 控制（当前 60s），并非"24h"那种长周期。
   `runtime_state.json` 路径在 `tools/blacklist.py` 黑名单里，Agent 不可改、自愈路径不被 Agent 干扰。
 - **util/** 是按"出现 2+ 次且 ≥5 行"原则抽出的共享小工具，避免过早抽象。
-  当前 **8 个模块**：`json_utils` / `jsonl_utils` / `subprocess_utils` / `diary_archive` / `git_helpers` /
-  `heartbeat` / `http_parents` / `web_search_rl`（见 ADR-0001 D1；v0.1.1 +diary_archive/git_helpers；v0.2.7 +heartbeat，见 ADR-0008；
-  v0.2.8 +http_parents，见 ADR-0009；v0.13.2 +web_search_rl，见 ADR-0024）。
+  当前 **9 个模块**：`json_utils` / `jsonl_utils` / `subprocess_utils` / `diary_archive` / `git_helpers` /
+  `heartbeat` / `http_parents` / `web_search_rl` / `print_guard`（见 ADR-0001 D1；v0.1.1 +diary_archive/git_helpers；v0.2.7 +heartbeat，见 ADR-0008；
+  v0.2.8 +http_parents，见 ADR-0009；v0.10 +print_guard，见 ADR-0018；v0.13.2 +web_search_rl，见 ADR-0024；v0.10 二次入表，见 ADR-0026 D2'）。
   `heartbeat.py::start_heartbeat_thread(...)` 与 `http_parents.py::setup_http_parents_channel(...)` 分别把
   main.py 中两段重复模板（heartbeat 7 行 while + try/except + wait；HTTP 父母通道 6+ 行 register + start + print）
   收敛到 util/，调用方按 `from xragent.util.<module> import ...` 直接用；`util/__init__.py` 不 re-export
@@ -83,8 +85,10 @@ src/xragent/
 ├── core/turn.py               # TurnRecord + TraceRecorder
 ├── core/react_loop.py         # ReAct 主循环（含 compress_if_needed 调用）
 ├── memory/manager.py          # MemoryManager：SQLite 长期事实 + compress_if_needed 封装
-│                             # 当前有效 schema 5.9（v0.2.7 +LRU 5.8；v0.5 5.9 二次回填 5.4/5.6 丢失的
-│                             # idx_facts_tags / idx_facts_title + 配套 recent() method），见 ADR-0004 / ADR-0008 / ADR-0014
+│                             # 当前有效 schema 5.11（v0.2.7 +LRU 5.8；v0.5 5.9 二次回填 5.4/5.6 丢失的
+│                             # idx_facts_tags / idx_facts_title + 配套 recent() method；v0.5.x +TTL 5.10
+│                             # +LFU 5.11 增量：expires_ts / access_count + recall_unexpired / set_ttl /
+│                             # touch_fact + recall_most_accessed，见 ADR-0004 / ADR-0008 / ADR-0014 / ADR-0025 / ADR-0026
 ├── compression/simple.py      # 最简压缩（SimpleCompression.compress）
 ├── compression/hook.py        # 压缩策略注册表（已注册 simple）；v0.2.10 import 整理
 │                             # （顶部 import + 无 noqa；见 ADR-0011 D5）
@@ -98,6 +102,10 @@ src/xragent/
 ├── snapshot/age_cleanup.py    # v0.11+ (round 231): cleanup_old_snapshots_by_age(max_age_days, dry_run=False)
 │                             #          时间清理 standalone 镜像（与 count_cleanup 对称），走 _tag_index helper
 │                             #          commit `fbe16191`，见 ADR-0019；side_git.py 旧 inline wrapper 保留
+├── snapshot/inspect.py        # v0.5.x round 421 (commit `467bf563`)：snapshot 只读 + 展示层
+│                             #          4 公开 API：SnapshotMeta + list_snapshots_with_meta +
+│                             #          count_over_age + format_snapshot_table；不引入 git 写操作，
+│                             #          与 count_cleanup.py / age_cleanup.py（写入层）对称；见 ADR-0026 B1
 ├── watchdog/__init__.py
 ├── watchdog/runtime_state.py  # heartbeat 读写 + is_alive / restart_count / bump_restart
 ├── watchdog/supervisor.py     # 子进程守护：fork + heartbeat 检测 + restart + 世代记录
@@ -141,18 +149,19 @@ src/xragent/
 ├── tools/diary_tools.py       # diary_write
 ├── tools/git_tools.py         # git_commit / git_push / snapshot_cleanup（medium，见 ADR-0007）
 ├── tools/evolve_tools.py      # propose_self_replace / terminate（高危，HITL 门控）
-├── util/                      # 8 个模块：json_utils / jsonl_utils / subprocess_utils
+├── util/                      # 9 个模块：json_utils / jsonl_utils / subprocess_utils
 │                             #          / diary_archive / git_helpers / heartbeat / http_parents
-│                             #          / web_search_rl（v0.13.2 见 ADR-0024）
+│                             #          / web_search_rl / print_guard（v0.10 见 ADR-0018 + 二次入表见 ADR-0026 D2'）
 │                             #   heartbeat.py:   start_heartbeat_thread（v0.2.7，见 ADR-0008）
 │                             #   http_parents.py: setup_http_parents_channel（v0.2.8，见 ADR-0009）
 │                             #   web_search_rl.py: per-host 5min 限流（Throttle + ThrottleState + acquire_slot，v0.13.2，见 ADR-0024）
+│                             #   print_guard.py:  print 二次入表兜底（v0.10，见 ADR-0018 / ADR-0026 D2'）
 ├── __tools_probe__.txt        # 47 bytes 探针残留（commit 91ea0843 同期，git tracked，
 │                             #   当前不被 import，清理决策留给后续轮次，见 ADR-0011 D3）
-├── scoring/                   # 占位包（v0.13.1 状态：持续仅 __pycache__/，缺 __init__.py，未 git tracked；
-│                             #   v0.3.1（ADR-0012 / ADR-0013 D6）登记预留 v0.4 评分基线；
-│                             #   v0.13.1（ADR-0017）重新确认仍未建不删；ROADMAP 未把 scoring/
-│                             #   提为 blocked，cleanup 决策留给后续轮次）
+├── scoring/                   # v0.4 baseline 已 ship（git tracked，commit `8125486d` + `a1d51ee2`）：
+│                             #   __init__.py + score.py；导出 score_turn + 3 常量（SCORE_ERROR / SCORE_OK_BASE /
+│                             #   SCORE_RANGE）；v0.3.1（ADR-0012 / ADR-0013 D6）登记预留 → v0.4 实际落地 →
+│                             #   round 562 ADR-0023 二次确认，round 635 ADR-0026 doc 同步
 └── llm/                       # 占位包，目前仅 __init__.py
 ```
 
@@ -211,7 +220,7 @@ src/xragent/
 | Autonomous next_task 参数化冷却 | `autonomous.next_task(rng=None, window_s=DEFAULT_COOLDOWN_S)` v0.2.11 起：`window_s` 显式参数（默认 7200s），不污染 module 常量，便于测试短时间绕过冷却（见 ADR-0011 D4） |
 | tools/registry 探针文件留痕 | `src/xragent/__tools_probe__.txt` v0.2.10 起：47 bytes 探针残留（commit 91ea0843 同期），git tracked，不被 import；清理决策留给后续轮次（见 ADR-0011 D3） |
 | compression/hook.py import 清洁 | `compression/hook.py` v0.2.10 起：顶部 import 整理、无 noqa 残留；保持 hook 表可读性（见 ADR-0011 D5） |
-| scoring/ 目录占位 | `src/xragent/scoring/` v0.13.1 状态：持续仅 `__pycache__/`，缺 `__init__.py`，未 git tracked；v0.3.1 登记预留 v0.4 评分基线（ADR-0012 / ADR-0013 D6）；v0.13.1 重新确认仍未建不删，cleanup 决策留给后续轮次（见 ADR-0017） |
+| scoring/ v0.4 baseline 已 ship | `src/xragent/scoring/` 当前状态：v0.4 baseline 已 ship（git tracked，commit `8125486d` + `a1d51ee2`）；`__init__.py` + `score.py` 都已 git tracked；导出 `score_turn` + 3 常量（`SCORE_ERROR` / `SCORE_OK_BASE` / `SCORE_RANGE`）；v0.3.1（ADR-0012 / ADR-0013 D6）登记预留 → v0.4 实际落地 → round 562 ADR-0023 二次确认 → round 635 ADR-0026 doc 同步；占位包措辞已在 v0.10 ADR-0018 / round 325 ADR-0021 / round 562 ADR-0022 三轮改正，本 ADR-0026 终态确认 |
 | web_search 5min 限流 + per-host throttle | `tools/web_search.py` v0.13.2 起：所有外部请求走 `util/web_search_rl.py::acquire_slot()`，per-host 5min 滑动窗口（`Throttle(60s window, 1 req/300s)`，命中 cooldown 时抛 `ThrottleState` 例外），curl_url 与 web_search 共用同一 throttle。落地：`_RATE_LIMIT = 300s`、`_WINDOW_S = 60s`、单进程内 `dict[str, ThrottleState]`；不走 `_RATE_LIMIT` 全局 hot-path，避免跨 host 误限。commit `e96001f8`，见 ADR-0024 |
 | Autonomous journal 写盘 | `autonomous.next_task` / `record_done` v0.13.2 起：可选 `journal` 句柄注入（默认 `None`，不写盘）；注入时按 entry→round_done 双行 JSONL 写到 `memory/queue.jsonl`（与 cooldown key 共用路径），便于断点复盘 / 外部观测；测试通过 fake journal 断言（不污染实际路径） |
 | Autonomous rng 显式参数化 | `autonomous.next_task(rng=None, journal=None, window_s=DEFAULT_COOLDOWN_S)` v0.13.2 起：`rng` 注入测试复现顺序、`journal` 注入观测（默认 None 不写盘），与 v0.2.11 `window_s` 参数（ADR-0011 D4）一致风格 —— 测试注入口集中、不污染 module 常量 |
@@ -241,4 +250,9 @@ src/xragent/
 | v0.5.9 | `snapshot/count_cleanup.py` 走 `_tag_index` helper（去掉 3 处 inline 重复）；保留/删除段用负索引 + 升序语义，无额外排序；commit `a59beb18` | ADR-0016 |
 | v0.11 | SideGit snapshot cleanup 加 `dry_run` 参数（按时间 + 按数量两条路径都加），仅列候选不实际 `git tag -d`；`snapshot_cleanup` 工具同步暴露 `dry_run`。ROADMAP v0.11 ✅，commit `0247b56b` | ADR-0016 |
 | v0.11+ (round 231) | `snapshot/age_cleanup.py` 抽出时间清理 standalone 镜像（与 `count_cleanup.py` 对称）；<br>模块级 `cleanup_old_snapshots_by_age(max_age_days, dry_run=False)` 全部走 `_tag_index` helper；<br>`side_git.py::cleanup_old_snapshots` 保留为兼容 wrapper（未删除，inline 路径未改 caller→callee，留给后续 round）；<br>commit `fbe16191`<br>注：ROADMAP 未把本轮拆为独立 v0.12，**实际 ship 但版本号待 v0.12 决策时合并** | ADR-0019 |
+| v0.4 | `scoring/` baseline 实际落地：`__init__.py` + `score.py` 都 git tracked，导出 `score_turn` + 3 常量（`SCORE_ERROR` / `SCORE_OK_BASE` / `SCORE_RANGE`）；commit `8125486d`（__init__.py）+ `a1d51ee2`（score.py）。round 562 ADR-0023 + round 635 ADR-0026 doc 同步 | ADR-0026 A2 |
+| v0.5.10 | `memory/manager.py` schema 5.10：`expires_ts`（INTEGER，可空）+ `recall_unexpired(limit=...)` + `set_ttl(fact_id, ttl_s)`；commit `cb13c186` 同期；TTL 仅追加字段、不删旧 fact、不改 `_migrate_all()` 顺序；`_migrate_v510()` 幂等执行 | ADR-0025 A1 / ADR-0026 A1 |
+| v0.5.11 | `memory/manager.py` schema 5.11：`access_count`（INTEGER default 0）+ `touch_fact(fact_id)` bump + `recall_most_accessed(limit=...)`；LFU 排序工具，复用 `recall_lru` 同一索引基础设施；commit `cb13c186` 同期；与 5.8 LRU 互补（LRU = 时间、LFU = 频次），`_migrate_v511()` 幂等执行；`SCHEMA_VERSION = 511` 一并 bump | ADR-0025 A1 / ADR-0026 A1 |
+| v0.10 (print_guard 二次入表) | `util/print_guard.py` 二次入表（ADR-0018 round 215+ 已抽模块但 §一 §二 §五多处漏登记）；round 635 ADR-0026 D2' 一并修：§一「当前 8 个模块」→「9 个模块」+ §二 util/ treelist 末尾补 print_guard.py + §五本行；commit 已在 ADR-0018 落地，doc 同步属本轮 ADR-0026 | ADR-0018 / ADR-0026 D2' |
+| v0.5.x (round 421) | `snapshot/inspect.py` 抽取：4 公开 API（SnapshotMeta + list_snapshots_with_meta + count_over_age + format_snapshot_table）；只读 + 展示层，不引入 git 写操作，与 count_cleanup.py / age_cleanup.py（写入层）对称；commit `467bf563` | ADR-0025 B1 / ADR-0026 B1 |
 | v0.13.2 (round 582) | `tools/web_search.py` 限流改造（5min cooldown + per-host throttle，命中抛 `ThrottleState`，不静默 swallow）+ `util/web_search_rl.py` 新增（Throttle + ThrottleState + acquire_slot，~40 行，规避 §二"过早抽象"门槛被 web_search + curl_url 双调用点对冲）<br>`autonomous.next_task` 加 `rng=None` + `journal=None` 显式参数（v0.13.2）：rng 注入测试复现顺序、journal 注入观测（默认 None 不写盘）；next_task 选 task 后写 entry、record_done 后写 round_done 到 `memory/queue.jsonl`（与 cooldown key 同路径）<br>doc 同步：ADR-0024（本轮 round 582）。未做：autonomous journal 双队列切分（current_done / queue_done 两表），已知遗留，决策留给后续轮次 | ADR-0024 |
