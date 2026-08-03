@@ -23,6 +23,7 @@ class _HitlRejected:
     __slots__ = ("reason",)
 
     def __init__(self, reason: str) -> None:
+        """存储 ``reason``；供 :class:`ToolRegistry` 拒绝路径读回。"""
         self.reason = reason
 
 
