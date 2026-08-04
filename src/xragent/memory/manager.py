@@ -30,7 +30,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Iterable, Optional
+from typing import Iterable
 
 
 SCHEMA_VERSION = 511  # 5.11
@@ -44,15 +44,15 @@ class Fact:
     ts: float
     category: str
     content: str
-    source_turn: Optional[str] = None
-    source_turn_idx: Optional[int] = None  # 5.1
+    source_turn: str | None = None
+    source_turn_idx: int | None = None  # 5.1
     priority: int = 0  # 5.3
     tags: list[str] = field(default_factory=list)
     archived: bool = False  # 5.5
     title: str = ""  # 5.6: 短标题, 默认空串
     confidence: float = 1.0  # 5.7: 0.0~1.0, 越高越可靠
     last_accessed_ts: float = 0.0  # 5.8: LRU 追踪, 默认 0.0; save_fact 时初始化=ts
-    expires_ts: Optional[float] = None  # 5.10: TTL 过期 unix 时间戳; None = 永不过期
+    expires_ts: float | None = None  # 5.10: TTL 过期 unix 时间戳; None = 永不过期
     access_count: int = 0  # 5.11: 访问次数, 与 last_accessed_ts 配合做精确 LFU
 
 
@@ -240,10 +240,10 @@ class MemoryManager:
         rows = self._conn.execute(sql, (title, k)).fetchall()
         return [self._row_to_fact(r) for r in rows]
 
-    def update_title(self, fact_id: int, new_title: Optional[str] = None) -> Optional[Fact]:
+    def update_title(self, fact_id: int, new_title: str | None = None) -> Fact | None:
         """5.6 新方法: 更新 title 并返回更新后的 Fact, ``None`` = id 不存在。
 
-        返回类型 ``Optional[Fact]`` 区分两种失败:
+        返回类型 ``Fact | None`` 区分两种失败:
           * rowcount=0 → ``None`` (id 不存在)
           * 写后再 SELECT 取不到 row → ``None`` (防御, 实际不应发生)
 
@@ -521,13 +521,13 @@ class MemoryManager:
         self,
         category: str,
         content: str,
-        source_turn: Optional[str] = None,
-        source_turn_idx: Optional[int] = None,
-        tags: Optional[Iterable[str]] = None,
+        source_turn: str | None = None,
+        source_turn_idx: int | None = None,
+        tags: Iterable[str] | None = None,
         priority: int = 0,
         title: str = "",
         confidence: float = 1.0,
-        expires_ts: Optional[float] = None,  # 5.10: TTL 过期时间 (unix)
+        expires_ts: float | None = None,  # 5.10: TTL 过期时间 (unix)
         access_count: int = 0,  # 5.11: 初始访问计数 (默认 0)
     ) -> Fact:
         """落库并返回带 id 的 Fact。"""
@@ -621,7 +621,7 @@ class MemoryManager:
         self,
         query: str = "",
         k: int = 5,
-        category: Optional[str] = None,
+        category: str | None = None,
     ) -> list[Fact]:
         """全文 LIKE 召回 (兼容老路径, 不过滤 archived)."""
         sql = "SELECT * FROM facts WHERE 1=1"
@@ -640,9 +640,9 @@ class MemoryManager:
 
     def recall_range(
         self,
-        start_ts: Optional[float] = None,
-        end_ts: Optional[float] = None,
-        category: Optional[str] = None,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+        category: str | None = None,
         k: int = 1000,
     ) -> list[Fact]:
         """按时间窗口召回; 开放端用 None."""
@@ -666,7 +666,7 @@ class MemoryManager:
     def top_frequent(
         self,
         n: int = 10,
-        category: Optional[str] = None,
+        category: str | None = None,
         min_count: int = 2,
     ) -> list[tuple[str, int]]:
         """按 content 频次降序的 top-N. 过滤 archived=0."""
@@ -711,7 +711,7 @@ class MemoryManager:
     def recall_high_priority(
         self,
         min_priority: int = 1,
-        category: Optional[str] = None,
+        category: str | None = None,
         k: int = 50,
     ) -> list[Fact]:
         """5.3: 高优先级召回 (idx_facts_category_priority_ts)."""
@@ -756,7 +756,7 @@ class MemoryManager:
         self,
         query: str = "",
         k: int = 5,
-        category: Optional[str] = None,
+        category: str | None = None,
     ) -> list[Fact]:
         """5.5: 仅召回未归档 (partial idx_facts_active)."""
         sql = "SELECT * FROM facts WHERE archived = 0"
@@ -781,7 +781,7 @@ class MemoryManager:
             ).fetchone()
         return int(r["c"])
 
-    def update_confidence(self, fact_id: int, confidence: float) -> Optional[Fact]:
+    def update_confidence(self, fact_id: int, confidence: float) -> Fact | None:
         """5.7: 更新某条 fact 的 confidence (clamp 到 [0,1]), 返回更新后 Fact.
 
         与 5.6 update_title 返回类型对齐 —— 都是"UPDATE + SELECT 回读完整 Fact"。
@@ -810,7 +810,7 @@ class MemoryManager:
     def recall_by_min_confidence(
         self,
         min_confidence: float = 0.5,
-        category: Optional[str] = None,
+        category: str | None = None,
         k: int = 100,
         include_archived: bool = False,
     ) -> list[Fact]:
@@ -895,7 +895,7 @@ class MemoryManager:
         self,
         fact_id: int,
         ttl_seconds: float,
-    ) -> Optional[Fact]:
+    ) -> Fact | None:
         """5.10 新方法: 设置某条 fact 的 TTL, 返回更新后 Fact; id 不存在 → None。
 
         TTL 语义:
@@ -935,7 +935,7 @@ class MemoryManager:
         self,
         query: str = "",
         k: int = 5,
-        category: Optional[str] = None,
+        category: str | None = None,
     ) -> list[Fact]:
         """5.10 新方法: 召回未过期 fact (走 idx_facts_expires_ts partial)。
 
@@ -973,7 +973,7 @@ class MemoryManager:
             rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_fact(r) for r in rows]
 
-    def purge_expired(self, now: Optional[float] = None) -> int:
+    def purge_expired(self, now: float | None = None) -> int:
         """5.10 新方法: 删除所有已过期 fact (expires_ts < now 且非 NULL)。
 
         走 partial index idx_facts_expires_ts — WHERE expires_ts IS NOT NULL
@@ -1004,7 +1004,7 @@ class MemoryManager:
         self,
         k: int = 10,
         active_only: bool = True,
-        category: Optional[str] = None,
+        category: str | None = None,
     ) -> list[Fact]:
         """5.11 新方法: 召回访问次数最多的 fact (走 idx_facts_access_count_ts)。
 
@@ -1039,7 +1039,7 @@ class MemoryManager:
         self,
         k: int = 10,
         active_only: bool = True,
-        category: Optional[str] = None,
+        category: str | None = None,
     ) -> list[Fact]:
         """5.11 新方法: 召回访问次数最少的 fact (回收候选)。
 
@@ -1073,13 +1073,13 @@ class MemoryManager:
         self,
         fact_id: int,
         n: int = 1,
-    ) -> Optional[Fact]:
+    ) -> Fact | None:
         """5.11 新方法: 原子累加 access_count (顺手刷新 last_accessed_ts)。
 
         与 :meth:`touch_fact` 不同 ——
         ``touch_fact`` 只刷时间戳不计数; 本方法计数+时间戳都更新, 用于
         "每次 recall / 命中 都应该被算一次访问"的场景。
-        返回 ``Optional[Fact]`` 与 update_title / update_confidence 一致,
+        返回 ``Fact | None`` 与 update_title / update_confidence 一致,
         区分"不存在 (None)"和"更新成功 (Fact)"。
 
         Args:
@@ -1087,7 +1087,7 @@ class MemoryManager:
             n: 累加值, 默认 1; 传负值表示"撤销访问" (很少用, 但允许)。
 
         Returns:
-            Optional[Fact]: 更新后的 Fact; ``id`` 不存在 → ``None``。
+            Fact | None: 更新后的 Fact; ``id`` 不存在 → ``None``。
         """
         if n == 0:
             # 0 = no-op, 仍返回当前 Fact (便于"读"语义)
